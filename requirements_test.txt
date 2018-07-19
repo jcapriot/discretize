@@ -1,0 +1,10 @@
+sphinx==1.5.6
+sphinx_rtd_theme
+sphinx-gallery
+nose
+pillow
+nose-cov
+pylint
+ipython
+pytest
+pymatsolver>=0.1.2
