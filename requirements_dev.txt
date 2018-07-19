@@ -3,6 +3,5 @@ scipy>=0.13
 cython
 matplotlib
 properties>=0.3.6b0
-vectormath
 wheel
 twine
