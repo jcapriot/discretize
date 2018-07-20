@@ -7,7 +7,7 @@ for PYBIN in /opt/python/*/bin; do
     "${PYBIN}/pip" wheel /io/ -w wheelhouse/
 done
 
-# Bundle external shared libraries into the wheels
-for whl in wheelhouse/*.whl; do
+# Bundle external shared libraries into the discretize wheels
+for whl in wheelhouse/discretize*.whl; do
     auditwheel repair "$whl" -w /io/wheelhouse/
 done
