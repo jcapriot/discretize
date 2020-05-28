@@ -2,13 +2,20 @@ from __future__ import print_function
 import numpy as np
 import warnings
 from discretize.utils import mkvc, ndgrid
+from discretize.utils.codeutils import requires
 from six import integer_types
+
+# matplotlib is a soft dependencies for discretize
 try:
-    import matplotlib.pyplot as plt
     import matplotlib
+    import matplotlib.pyplot as plt
+    from matplotlib.widgets import Slider
     from mpl_toolkits.mplot3d import Axes3D
+    import matplotlib.colors as colors
+    import matplotlib.cm as cmx
+    from matplotlib.collections import PatchCollection
 except ImportError:
-    print('Trouble importing matplotlib.')
+    matplotlib = False
 
 
 class TensorView(object):
@@ -42,6 +49,7 @@ class TensorView(object):
     #         pltNum +=1
     #     if showIt: plt.show()
 
+    @requires({'matplotlib': matplotlib})
     def plotImage(
         self, v, vType='CC', grid=False, view='real',
         ax=None, clim=None, showIt=False,
@@ -59,7 +67,7 @@ class TensorView(object):
 
         Input:
 
-        :param numpy.array v: vector
+        :param numpy.ndarray v: vector
 
         Optional Inputs:
 
@@ -195,6 +203,7 @@ class TensorView(object):
             plt.show()
         return ph
 
+    @requires({'matplotlib': matplotlib})
     def plotSlice(
         self, v, vType='CC',
         normal='Z', ind=None, grid=False, view='real',
@@ -205,7 +214,8 @@ class TensorView(object):
         range_x=None,
         range_y=None,
         sample_grid=None,
-        stream_threshold=None
+        stream_threshold=None,
+        stream_thickness=None
     ):
 
         """
@@ -248,7 +258,8 @@ class TensorView(object):
                         v, vType=vTypeI, normal=normal, ind=ind, grid=grid,
                         view=view, ax=ax, clim=clim, showIt=False,
                         pcolorOpts=pcolorOpts, streamOpts=streamOpts,
-                        gridOpts=gridOpts, stream_threshold=stream_threshold
+                        gridOpts=gridOpts, stream_threshold=stream_threshold,
+                        stream_thickness=stream_thickness
                     )
                 ]
             return out
@@ -350,7 +361,9 @@ class TensorView(object):
             range_x=range_x,
             range_y=range_y,
             sample_grid=sample_grid,
-            stream_threshold=stream_threshold
+            stream_threshold=stream_threshold,
+            stream_thickness=stream_thickness
+
         )
 
         ax.set_xlabel('y' if normal == 'X' else 'x')
@@ -358,6 +371,7 @@ class TensorView(object):
         ax.set_title('Slice {0:.0f}'.format(ind))
         return out
 
+    @requires({'matplotlib': matplotlib})
     def _plotImage2D(
         self, v, vType='CC', grid=False, view='real',
         ax=None, clim=None, showIt=False,
@@ -367,7 +381,8 @@ class TensorView(object):
         range_x=None,
         range_y=None,
         sample_grid=None,
-        stream_threshold=None
+        stream_threshold=None,
+        stream_thickness=None
     ):
 
         if pcolorOpts is None:
@@ -493,6 +508,36 @@ class TensorView(object):
                 Ui = np.ma.masked_where(mask_me, Ui)
                 Vi = np.ma.masked_where(mask_me, Vi)
 
+
+            if stream_thickness is not None:
+                scaleFact = np.copy(stream_thickness)
+
+                # Calculate vector amplitude
+                vecAmp = np.sqrt(U**2 + V**2).T
+
+                # Form bounds to knockout the top and bottom 10%
+                vecAmp_sort = np.sort(vecAmp.ravel())
+                nVecAmp = vecAmp.size
+                tenPercInd = int(np.ceil(0.1*nVecAmp))
+                lowerBound = vecAmp_sort[tenPercInd]
+                upperBound = vecAmp_sort[-tenPercInd]
+
+                lowInds = np.where(vecAmp < lowerBound)
+                vecAmp[lowInds] = lowerBound
+
+                highInds = np.where(vecAmp > upperBound)
+                vecAmp[highInds] = upperBound
+
+                # Normalize amplitudes 0-1
+                norm_thickness = vecAmp/vecAmp.max()
+
+                # Scale by user defined thickness factor
+                stream_thickness = scaleFact*norm_thickness
+
+                # Add linewidth to streamOpts
+                streamOpts.update({'linewidth':stream_thickness})
+
+
             out += (
                 ax.pcolormesh(
                     x, y, np.sqrt(U**2+V**2).T, vmin=clim[0], vmax=clim[1],
@@ -528,9 +573,10 @@ class TensorView(object):
             plt.show()
         return out
 
+    @requires({'matplotlib': matplotlib})
     def plotGrid(
         self, ax=None, nodes=False, faces=False, centers=False, edges=False,
-        lines=True, showIt=False
+        lines=True, showIt=False, **kwargs
     ):
         """Plot the nodal, cell-centered and staggered grids for 1,2 and 3 dimensions.
 
@@ -571,6 +617,9 @@ class TensorView(object):
         else:
             if not isinstance(ax, matplotlib.axes.Axes):
                 raise AssertionError("ax must be an matplotlib.axes.Axes")
+        if lines:
+            color = kwargs.get('color', 'C0')
+            linewidth = kwargs.get('linewidth', 1.)
 
         if self.dim == 1:
             if nodes:
@@ -585,7 +634,7 @@ class TensorView(object):
                 )
             if lines:
                 ax.plot(
-                    self.gridN, np.ones(self.nN), color="C0", linestyle=".-"
+                    self.gridN, np.ones(self.nN), color="C0", linestyle="-"
                 )
             ax.set_xlabel('x1')
         elif self.dim == 2:
@@ -618,6 +667,7 @@ class TensorView(object):
                     marker="^", linestyle=""
                 )
 
+
             # Plot the grid lines
             if lines:
                 NN = self.r(self.gridN, 'N', 'N', 'M')
@@ -627,7 +677,7 @@ class TensorView(object):
                 Y2 = np.c_[mkvc(NN[1][:, 0]), mkvc(NN[1][:, self.nCy]), mkvc(NN[1][:, 0])*np.nan].flatten()
                 X = np.r_[X1, X2]
                 Y = np.r_[Y1, Y2]
-                ax.plot(X, Y, color="C0", linestyle="-")
+                ax.plot(X, Y, color=color, linestyle="-", lw=linewidth)
 
             ax.set_xlabel('x1')
             ax.set_ylabel('x2')
@@ -684,7 +734,7 @@ class TensorView(object):
                 X = np.r_[X1, X2, X3]
                 Y = np.r_[Y1, Y2, Y3]
                 Z = np.r_[Z1, Z2, Z3]
-                ax.plot(X, Y, color="C0", linestyle="-", zs=Z)
+                ax.plot(X, Y, color=color, linestyle="-", lw=linewidth, zs=Z)
             ax.set_xlabel('x1')
             ax.set_ylabel('x2')
             ax.set_zlabel('x3')
@@ -696,8 +746,63 @@ class TensorView(object):
         return ax
 
 
+    @requires({'matplotlib': matplotlib})
+    def plot_3d_slicer(self, v, xslice=None, yslice=None, zslice=None,
+                       vType='CC', view='real', axis='xy', transparent=None,
+                       clim=None, xlim=None, ylim=None, zlim=None,
+                       aspect='auto', grid=[2, 2, 1], pcolorOpts=None,
+                       fig=None):
+        """Plot slices of a 3D volume, interactively (scroll wheel).
+
+        If called from a notebook, make sure to set
+
+            %matplotlib notebook
+
+        See the class `discretize.View.Slicer` for more information.
+
+        It returns nothing. However, if you need the different figure handles
+        you can get it via
+
+          `fig = plt.gcf()`
+
+        and subsequently its children via
+
+          `fig.get_children()`
+
+        and recursively deeper, e.g.,
+
+          `fig.get_children()[0].get_children()`.
+
+        One can also provide an existing figure instance, which can be useful
+        for interactive widgets in Notebooks. The provided figure is cleared
+        first.
+
+        """
+        # Initiate figure
+        if fig is None:
+            fig = plt.figure()
+        else:
+            fig.clf()
+
+        # Populate figure
+        tracker = Slicer(
+            self, v, xslice, yslice, zslice, vType, view, axis, transparent,
+            clim, xlim, ylim, zlim, aspect, grid, pcolorOpts
+        )
+
+        # Connect figure to scrolling
+        fig.canvas.mpl_connect('scroll_event', tracker.onscroll)
+
+        # Show figure
+        plt.show()
+
+
 class CylView(object):
 
+    def __init__(self):
+        pass
+
+    @requires({'matplotlib': matplotlib})
     def _plotCylTensorMesh(self, plotType, *args, **kwargs):
 
         if not self.isSymmetric:
@@ -794,6 +899,7 @@ class CylView(object):
 
         return out
 
+    @requires({'matplotlib': matplotlib})
     def plotGrid(self, *args, **kwargs):
         if self.isSymmetric:
             return self._plotCylTensorMesh('plotGrid', *args, **kwargs)
@@ -863,6 +969,7 @@ for reference, see: http://matplotlib.org/examples/pylab_examples/polar_demo.htm
 
         return ax
 
+    @requires({'matplotlib': matplotlib})
     def _plotGridThetaSlice(self, *args, **kwargs):
         if self.isSymmetric:
             return self.plotGrid(*args, **kwargs)
@@ -872,6 +979,7 @@ for reference, see: http://matplotlib.org/examples/pylab_examples/polar_demo.htm
         mesh2D = self.__class__(h=h2d, x0=self.x0)
         return mesh2D.plotGrid(*args, **kwargs)
 
+    @requires({'matplotlib': matplotlib})
     def _plotGridZSlice(self, *args, **kwargs):
         # https://github.com/matplotlib/matplotlib/issues/312
         ax = kwargs.get('ax', None)
@@ -906,20 +1014,23 @@ for reference, see: http://matplotlib.org/examples/pylab_examples/polar_demo.htm
             mkvc(NN[1][0, :])*np.nan
         ].flatten()
 
-        ax.plot(Y1, X1, linestyle="-", color="C0")
+        color = kwargs.get('color', 'C0')
+        linewidth = kwargs.get('linewidth', 1.)
+        ax.plot(Y1, X1, linestyle="-", color=color, lw=linewidth)
 
         # circles
         n = 100
         XY2 = [
             ax.plot(
                 np.linspace(0., np.pi*2, n), r*np.ones(n), linestyle="-",
-                color="C0"
+                color=color, lw=linewidth
             )
             for r in self.vectorNx
         ]
 
         return ax
 
+    @requires({'matplotlib': matplotlib})
     def plotImage(self, *args, **kwargs):
         return self._plotCylTensorMesh('plotImage', *args, **kwargs)
 
@@ -934,9 +1045,10 @@ class CurviView(object):
     def __init__(self):
         pass
 
+    @requires({'matplotlib': matplotlib})
     def plotGrid(
         self, ax=None, nodes=False, faces=False, centers=False, edges=False,
-        lines=True, showIt=False
+        lines=True, showIt=False, **kwargs
     ):
         """Plot the nodal, cell-centered and staggered grids for 1, 2 and 3 dimensions.
 
@@ -950,9 +1062,6 @@ class CurviView(object):
             M.plotGrid(showIt=True)
 
         """
-        import matplotlib.pyplot as plt
-        import matplotlib
-        from mpl_toolkits.mplot3d import Axes3D
 
         axOpts = {'projection': '3d'} if self.dim == 3 else {}
         if ax is None:
@@ -971,11 +1080,11 @@ class CurviView(object):
                 X = np.r_[X1, X2]
                 Y = np.r_[Y1, Y2]
 
-                ax.plot(X, Y, color="C0", linestyle="-")
+                ax.plot(X, Y, color="C0", linestyle="-", **kwargs)
             if centers:
                 ax.plot(
                     self.gridCC[:, 0], self.gridCC[:, 1], color="C1",
-                    linestyle="", marker="o"
+                    linestyle="", marker="o", **kwargs
                 )
 
             # Nx = self.r(self.normals, 'F', 'Fx', 'V')
@@ -1022,7 +1131,7 @@ class CurviView(object):
             Y = np.r_[Y1, Y2, Y3]
             Z = np.r_[Z1, Z2, Z3]
 
-            ax.plot(X, Y, 'C0', zs=Z)
+            ax.plot(X, Y, 'C0', zs=Z, **kwargs)
             ax.set_zlabel('x3')
 
         ax.grid(True)
@@ -1034,43 +1143,519 @@ class CurviView(object):
 
         return ax
 
+    @requires({'matplotlib': matplotlib})
     def plotImage(
-        self, I, ax=None, showIt=False, grid=False, clim=None
+        self, v, vType='CC', grid=False, view='real',
+        ax=None, clim=None, showIt=False,
+        pcolorOpts=None,
+        gridOpts=None,
+        range_x=None, range_y=None
     ):
         if self.dim == 3:
             raise NotImplementedError('This is not yet done!')
-
-        import matplotlib.pyplot as plt
-        import matplotlib
-        from mpl_toolkits.mplot3d import Axes3D
-        import matplotlib.colors as colors
-        import matplotlib.cm as cmx
+        if view == 'vec':
+            raise NotImplementedError(
+                'Vector ploting is not supported on CurvilinearMesh (yet)'
+                )
+        if view in ['real', 'imag', 'abs']:
+            v = getattr(np, view)(v)  # e.g. np.real(v)
+        if vType == 'CC':
+            I = v
+        elif vType == 'N':
+            I = self.aveN2CC*v
+        elif vType in ['Fx', 'Fy', 'Ex', 'Ey']:
+            aveOp = 'ave' + vType[0] + '2CCV'
+            ind_xy = {'x': 0, 'y': 1}[vType[1]]
+            I = (getattr(self, aveOp)*v).reshape(2, self.nC)[ind_xy]  # average to cell centers
 
         if ax is None:
             ax = plt.subplot(111)
+        if pcolorOpts is None:
+            pcolorOpts = {}
+        if 'cmap' in pcolorOpts:
+            cm = pcolorOpts['cmap']
+        else:
+            cm = plt.get_cmap()
+        if 'vmin' in pcolorOpts:
+            vmin = pcolorOpts['vmin']
+        else:
+            vmin = np.nanmin(I) if clim is None else clim[0]
+        if 'vmax' in pcolorOpts:
+            vmax = pcolorOpts['vmax']
+        else:
+            vmax = np.nanmax(I) if clim is None else clim[1]
+        if 'alpha' in pcolorOpts:
+            alpha = pcolorOpts['alpha']
+        else:
+            alpha = 1.0
+        if gridOpts is None:
+            gridOpts = {'color': 'k'}
+        if 'color' not in gridOpts:
+            gridOpts['color'] = 'k'
 
-        jet = cm = plt.get_cmap('jet')
-        cNorm  = colors.Normalize(
-            vmin=I.min() if clim is None else clim[0],
-            vmax=I.max() if clim is None else clim[1])
+        cNorm = colors.Normalize(vmin=vmin, vmax=vmax)
+        scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=cm)
 
-        scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=jet)
-        # ax.set_xlim((self.x0[0], self.h[0].sum()))
-        # ax.set_ylim((self.x0[1], self.h[1].sum()))
+        if 'edge_color' in pcolorOpts:
+            edge_color = pcolorOpts['edge_color']
+        else:
+            edge_color = gridOpts['color'] if grid else 'none'
+        if 'alpha' in gridOpts:
+            edge_alpha = gridOpts['alpha']
+        else:
+            edge_alpha = 1.0
+        if edge_color.lower() != 'none':
+            if isinstance(edge_color, str):
+                edge_color = colors.to_rgba(edge_color, edge_alpha)
+            else:
+                edge_color = colors.to_rgba_array(edge_color, edge_alpha)
 
         Nx = self.r(self.gridN[:, 0], 'N', 'N', 'M')
         Ny = self.r(self.gridN[:, 1], 'N', 'N', 'M')
-        cell = self.r(I, 'CC', 'CC', 'M')
+        cells = self.r(I, 'CC', 'CC', 'M').reshape(-1)
 
+        polys = []
+        facecolors = scalarMap.to_rgba(cells)
+        facecolors[:, -1] = alpha
         for ii in range(self.nCx):
+            i_s = [ii, ii+1, ii+1, ii]
             for jj in range(self.nCy):
-                I = [ii, ii+1, ii+1, ii]
-                J = [jj, jj, jj+1, jj+1]
-                ax.add_patch(plt.Polygon(np.c_[Nx[I, J], Ny[I, J]], facecolor=scalarMap.to_rgba(cell[ii, jj]), edgecolor='k' if grid else 'none'))
+                j_s = [jj, jj, jj+1, jj+1]
+                polys.append(plt.Polygon(np.c_[Nx[i_s, j_s], Ny[i_s, j_s]]))
 
+        pc = PatchCollection(polys, facecolor=facecolors, edgecolor=edge_color)
+        # Add collection to axes
+        ax.add_collection(pc)
         scalarMap._A = []  # http://stackoverflow.com/questions/8342549/matplotlib-add-colorbar-to-a-sequence-of-line-plots
         ax.set_xlabel('x')
         ax.set_ylabel('y')
         if showIt:
             plt.show()
         return [scalarMap]
+
+
+@requires({'matplotlib': matplotlib})
+class Slicer(object):
+    """Plot slices of a 3D volume, interactively (scroll wheel).
+
+    If called from a notebook, make sure to set
+
+        %matplotlib notebook
+
+    The straight forward usage for the Slicer is through, e.g., a
+    `TensorMesh`-mesh, by accessing its `mesh.plot_3d_slicer`.
+
+    If you, however, call this class directly, you have first to initiate a
+    figure, and afterwards connect it:
+
+    >>> # You have to initialize a figure
+    >>> fig = plt.figure()
+    >>> # Then you have to get the tracker from the Slicer
+    >>> tracker = discretize.View.Slicer(mesh, Lpout)
+    >>> # Finally you have to connect the tracker to the figure
+    >>> fig.canvas.mpl_connect('scroll_event', tracker.onscroll)
+    >>> plt.show()
+
+
+    **Parameters**
+
+    v : array
+        Data array of length self.nC.
+
+    xslice, yslice, zslice : floats, optional
+        Initial slice locations (in meter);
+        defaults to the middle of the volume.
+
+    vType: str
+        Type of visualization. Default is 'CC'.
+        One of ['CC', 'Fx', 'Fy', 'Fz', 'Ex', 'Ey', 'Ez'].
+
+    view : str
+        Which component to show. Defaults to 'real'.
+        One of  ['real', 'imag', 'abs'].
+
+    axis : 'xy' (default) or 'yx'
+        'xy': horizontal axis is x, vertical axis is y. Reversed otherwise.
+
+    transparent : 'slider' or list of floats or pairs of floats, optional
+        Values to be removed. E.g. air, water.
+        If single value, only exact matches are removed. Pairs are treated as
+        ranges. E.g. [0.3, [1, 4], [-np.infty, -10]] removes all values equal
+        to 0.3, all values between 1 and 4, and all values smaller than -10.
+        If 'slider' is provided it will plot an interactive slider to choose
+        the shown range.
+
+    clim : None or list of [min, max]
+        For pcolormesh (vmin, vmax).
+
+    xlim, ylim, zlim : None or list of [min, max]
+        Axis limits.
+
+    aspect : 'auto', 'equal', or num
+        Aspect ratio of subplots. Defaults to 'auto'.
+
+        A list of two values can be provided. The first will be for the
+        XY-plot, the second for the XZ- and YZ-plots, e.g. ['equal', 2] to have
+        the vertical dimension exaggerated by a factor of 2.
+
+        WARNING: For anything else than 'auto', unexpected things might happen
+                 when zooming, and the subplot-arrangement won't look pretty.
+
+    grid : list of 3 int
+        Number of cells occupied by x, y, and z dimension on plt.subplot2grid.
+
+    pcolorOpts : dictionary
+        Passed to pcolormesh.
+
+    """
+
+    def __init__(self, mesh, v, xslice=None, yslice=None, zslice=None,
+                 vType='CC', view='real', axis='xy', transparent=None,
+                 clim=None, xlim=None, ylim=None, zlim=None, aspect='auto',
+                 grid=[2, 2, 1], pcolorOpts=None):
+        """Initialize interactive figure."""
+
+        # 0. Some checks, not very extensive
+
+        # (a) Mesh dimensionality
+        if mesh.dim != 3:
+            err = 'Must be a 3D mesh. Use plotImage instead.'
+            err += ' Mesh provided has {} dimension(s).'.format(mesh.dim)
+            raise ValueError(err)
+
+        # (b) vType  # Not yet working for ['CCv']
+        vTypeOpts = ['CC', 'Fx', 'Fy', 'Fz', 'Ex', 'Ey', 'Ez']
+        if vType not in vTypeOpts:
+            err = "vType must be in ['{0!s}'].".format("', '".join(vTypeOpts))
+            err += " vType provided: '{0!s}'.".format(vType)
+            raise ValueError(err)
+
+        if vType != 'CC':
+            aveOp = 'ave' + vType + '2CC'
+            Av = getattr(mesh, aveOp)
+            if v.size == Av.shape[1]:
+                v = Av * v
+            else:
+                v = mesh.r(v, vType[0], vType) # get specific component
+                v = Av * v
+
+        # (c) vOpts  # Not yet working for 'vec'
+
+        # Backwards compatibility
+        if view in ['xy', 'yx']:
+            axis = view
+            view = 'real'
+
+        viewOpts = ['real', 'imag', 'abs']
+        if view in viewOpts:
+            v = getattr(np, view)(v) # e.g. np.real(v)
+        else:
+            err = "view must be in ['{0!s}'].".format("', '".join(viewOpts))
+            err += " view provided: '{0!s}'.".format(view)
+            raise ValueError(err)
+
+        # 1. Store relevant data
+
+        # Store data in self as (nx, ny, nz)
+        self.v = mesh.r(v.reshape((mesh.nC, -1), order='F'), 'CC', 'CC', 'M')
+        self.v = np.ma.masked_where(np.isnan(self.v), self.v)
+
+        # Store relevant information from mesh in self
+        self.x = mesh.vectorNx    # x-node locations
+        self.y = mesh.vectorNy    # y-node locations
+        self.z = mesh.vectorNz    # z-node locations
+        self.xc = mesh.vectorCCx  # x-cell center locations
+        self.yc = mesh.vectorCCy  # y-cell center locations
+        self.zc = mesh.vectorCCz  # z-cell center locations
+
+        # Axis: Default ('xy'): horizontal axis is x, vertical axis is y.
+        # Reversed otherwise.
+        self.yx = axis == 'yx'
+
+        # Store initial slice indices; if not provided, takes the middle.
+        if xslice is not None:
+            self.xind = np.argmin(np.abs(self.xc - xslice))
+        else:
+            self.xind = self.xc.size // 2
+        if yslice is not None:
+            self.yind = np.argmin(np.abs(self.yc - yslice))
+        else:
+            self.yind = self.yc.size // 2
+        if zslice is not None:
+            self.zind = np.argmin(np.abs(self.zc - zslice))
+        else:
+            self.zind = self.zc.size // 2
+
+        # Aspect ratio
+        if isinstance(aspect, (list, tuple)):
+            aspect1 = aspect[0]
+            aspect2 = aspect[1]
+        else:
+            aspect1 = aspect
+            aspect2 = aspect
+        if aspect2 in ['auto', 'equal']:
+            aspect3 = aspect2
+        else:
+            aspect3 = 1.0/aspect2
+
+        # Store min and max of all data
+        if clim is None:
+            clim = [np.nanmin(self.v), np.nanmax(self.v)]
+        # In the case of a homogeneous fullspace provide a small range to avoid
+        # problems with colorbar and the three subplots.
+        if clim[0] == clim[1]:
+            clim = [0.99*clim[0], 1.01*clim[1]]
+        self.pc_props = {'vmin': clim[0], 'vmax': clim[1]}
+
+        # 2. Start populating figure
+
+        # Get plot2grid dimension
+        figgrid = (grid[0]+grid[2], grid[1]+grid[2])
+
+        # Create subplots
+        self.fig = plt.gcf()
+        self.fig.subplots_adjust(wspace=.075, hspace=.1)
+
+        # X-Y
+        self.ax1 = plt.subplot2grid(figgrid, (0, 0), colspan=grid[1],
+                                    rowspan=grid[0], aspect=aspect1)
+        if self.yx:
+            self.ax1.set_ylabel('x')
+            if ylim is not None:
+                self.ax1.set_xlim([ylim[0], ylim[1]])
+            if xlim is not None:
+                self.ax1.set_ylim([xlim[0], xlim[1]])
+        else:
+            self.ax1.set_ylabel('y')
+            if xlim is not None:
+                self.ax1.set_xlim([xlim[0], xlim[1]])
+            if ylim is not None:
+                self.ax1.set_ylim([ylim[0], ylim[1]])
+        self.ax1.xaxis.set_ticks_position('top')
+        plt.setp(self.ax1.get_xticklabels(), visible=False)
+
+        # X-Z
+        self.ax2 = plt.subplot2grid(figgrid, (grid[0], 0), colspan=grid[1],
+                                    rowspan=grid[2], sharex=self.ax1,
+                                    aspect=aspect2)
+        self.ax2.yaxis.set_ticks_position('both')
+        if self.yx:
+            self.ax2.set_xlabel('y')
+            if ylim is not None:
+                self.ax2.set_xlim([ylim[0], ylim[1]])
+        else:
+            self.ax2.set_xlabel('x')
+            if xlim is not None:
+                self.ax2.set_xlim([xlim[0], xlim[1]])
+        self.ax2.set_ylabel('z')
+        if zlim is not None:
+            self.ax2.set_ylim([zlim[0], zlim[1]])
+
+        # Z-Y
+        self.ax3 = plt.subplot2grid(figgrid, (0, grid[1]), colspan=grid[2],
+                                    rowspan=grid[0], sharey=self.ax1,
+                                    aspect=aspect3)
+        self.ax3.yaxis.set_ticks_position('right')
+        self.ax3.xaxis.set_ticks_position('both')
+        self.ax3.invert_xaxis()
+        plt.setp(self.ax3.get_yticklabels(), visible=False)
+        if self.yx:
+            if xlim is not None:
+                self.ax3.set_ylim([xlim[0], xlim[1]])
+        else:
+            if ylim is not None:
+                self.ax3.set_ylim([ylim[0], ylim[1]])
+        if zlim is not None:
+            self.ax3.set_xlim([zlim[1], zlim[0]])
+
+        # Cross-line properties
+        # We have to lines, a thick white one, and in the middle a thin black
+        # one, to assure that the lines can be seen on dark and on bright
+        # spots.
+        self.clpropsw = {'c': 'w', 'lw': 2, 'zorder': 10}
+        self.clpropsk = {'c': 'k', 'lw': 1, 'zorder': 11}
+
+        # Add pcolorOpts
+        if pcolorOpts is not None:
+            self.pc_props.update(pcolorOpts)
+
+        # Initial draw
+        self.update_xy()
+        self.update_xz()
+        self.update_zy()
+
+        # Create colorbar
+        plt.colorbar(self.zy_pc, pad=0.15)
+
+        # Remove transparent value
+        if isinstance(transparent, str) and transparent.lower() == 'slider':
+            # Sliders
+            self.ax_smin = plt.axes([0.7, 0.11, 0.15, 0.03])
+            self.ax_smax = plt.axes([0.7, 0.15, 0.15, 0.03])
+
+            # Limits slightly below/above actual limits, clips otherwise
+            self.smin = Slider(self.ax_smin, 'Min', *clim, valinit=clim[0])
+            self.smax = Slider(self.ax_smax, 'Max', *clim, valinit=clim[1])
+
+            def update(val):
+                self.v.mask = False  # Re-set
+                self.v = np.ma.masked_outside(self.v.data, self.smin.val,
+                                              self.smax.val)
+                # Update plots
+                self.update_xy()
+                self.update_xz()
+                self.update_zy()
+
+            self.smax.on_changed(update)
+            self.smin.on_changed(update)
+
+        elif transparent is not None:
+
+            # Loop over values
+            for value in transparent:
+                # If value is a list/tuple, we treat is as a range
+                if isinstance(value, (list, tuple)):
+                    self.v = np.ma.masked_inside(self.v, value[0], value[1])
+                else: # Exact value
+                    self.v = np.ma.masked_equal(self.v, value)
+
+            # Update plots
+            self.update_xy()
+            self.update_xz()
+            self.update_zy()
+
+        # 3. Keep depth in X-Z and Z-Y in sync
+
+        def do_adjust():
+            """Return True if z-axis in X-Z and Z-Y are different."""
+            one = np.array(self.ax2.get_ylim())
+            two = np.array(self.ax3.get_xlim())[::-1]
+            return sum(abs(one - two)) > 0.001  # Difference at least 1 m.
+
+        def on_ylims_changed(ax):
+            """Adjust Z-Y if X-Z changed."""
+            if do_adjust():
+                self.ax3.set_xlim([self.ax2.get_ylim()[1],
+                                   self.ax2.get_ylim()[0]])
+
+        def on_xlims_changed(ax):
+            """Adjust X-Z if Z-Y changed."""
+            if do_adjust():
+                self.ax2.set_ylim([self.ax3.get_xlim()[1],
+                                   self.ax3.get_xlim()[0]])
+
+        self.ax3.callbacks.connect('xlim_changed', on_xlims_changed)
+        self.ax2.callbacks.connect('ylim_changed', on_ylims_changed)
+
+    def onscroll(self, event):
+        """Update index and data when scrolling."""
+
+        # Get scroll direction
+        if event.button == 'up':
+            pm = 1
+        else:
+            pm = -1
+
+        # Update slice index depending on subplot over which mouse is
+        if event.inaxes == self.ax1:    # X-Y
+            self.zind = (self.zind + pm) % self.zc.size
+            self.update_xy()
+        elif event.inaxes == self.ax2:  # X-Z
+            if self.yx:
+                self.xind = (self.xind + pm) % self.xc.size
+            else:
+                self.yind = (self.yind + pm) % self.yc.size
+            self.update_xz()
+        elif event.inaxes == self.ax3:  # Z-Y
+            if self.yx:
+                self.yind = (self.yind + pm) % self.yc.size
+            else:
+                self.xind = (self.xind + pm) % self.xc.size
+            self.update_zy()
+
+        plt.draw()
+
+    def update_xy(self):
+        """Update plot for change in Z-index."""
+
+        # Clean up
+        self._clear_elements(['xy_pc', 'xz_ahw', 'xz_ahk', 'zy_avw', 'zy_avk'])
+
+        # Draw X-Y slice
+        if self.yx:
+            zdat = np.rot90(self.v[:, :, self.zind].transpose())
+            hor = self.y
+            ver = self.x
+        else:
+            zdat = self.v[:, :, self.zind].transpose()
+            hor = self.x
+            ver = self.y
+        self.xy_pc = self.ax1.pcolormesh(hor, ver, zdat, **self.pc_props)
+
+        # Draw Z-slice intersection in X-Z plot
+        self.xz_ahw = self.ax2.axhline(self.zc[self.zind], **self.clpropsw)
+        self.xz_ahk = self.ax2.axhline(self.zc[self.zind], **self.clpropsk)
+
+        # Draw Z-slice intersection in Z-Y plot
+        self.zy_avw = self.ax3.axvline(self.zc[self.zind], **self.clpropsw)
+        self.zy_avk = self.ax3.axvline(self.zc[self.zind], **self.clpropsk)
+
+    def update_xz(self):
+        """Update plot for change in Y-index."""
+
+        # Clean up
+        self._clear_elements(['xz_pc', 'zy_ahk', 'zy_ahw', 'xy_ahk', 'xy_ahw'])
+
+        # Draw X-Z slice
+        if self.yx:
+            ydat = self.v[-self.xind, :, :].transpose()
+            hor = self.y
+            ver = self.z
+            ind = self.xc[self.xind]
+        else:
+            ydat = self.v[:, self.yind, :].transpose()
+            hor = self.x
+            ver = self.z
+            ind = self.yc[self.yind]
+        self.xz_pc = self.ax2.pcolormesh(hor, ver, ydat, **self.pc_props)
+
+        # Draw X-slice intersection in X-Y plot
+        self.xy_ahw = self.ax1.axhline(ind, **self.clpropsw)
+        self.xy_ahk = self.ax1.axhline(ind, **self.clpropsk)
+
+        # Draw X-slice intersection in Z-Y plot
+        self.zy_ahw = self.ax3.axhline(ind, **self.clpropsw)
+        self.zy_ahk = self.ax3.axhline(ind, **self.clpropsk)
+
+    def update_zy(self):
+        """Update plot for change in X-index."""
+
+        # Clean up
+        self._clear_elements(['zy_pc', 'xz_avw', 'xz_avk', 'xy_avw', 'xy_avk'])
+
+        # Draw Z-Y slice
+        if self.yx:
+            xdat = np.flipud(self.v[:, self.yind, :])
+            hor = self.z
+            ver = self.x
+            ind = self.yc[self.yind]
+        else:
+            xdat = self.v[self.xind, :, :]
+            hor = self.z
+            ver = self.y
+            ind = self.xc[self.xind]
+        self.zy_pc = self.ax3.pcolormesh(hor, ver, xdat, **self.pc_props)
+
+        # Draw Y-slice intersection in X-Y plot
+        self.xy_avw = self.ax1.axvline(ind, **self.clpropsw)
+        self.xy_avk = self.ax1.axvline(ind, **self.clpropsk)
+
+        # Draw Y-slice intersection in X-Z plot
+        self.xz_avw = self.ax2.axvline(ind, **self.clpropsw)
+        self.xz_avk = self.ax2.axvline(ind, **self.clpropsk)
+
+    def _clear_elements(self, names):
+        """Remove elements from list <names> from plot if they exists."""
+        for element in names:
+            if hasattr(self, element):
+                getattr(self, element).remove()

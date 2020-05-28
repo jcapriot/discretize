@@ -10,7 +10,7 @@ from .matutils import (
 from .codeutils import (isScalar, asArray_N_x_Dim)
 from .meshutils import (
     exampleLrmGrid, meshTensor, closestPoints, ExtractCoreMesh,
-    random_model
+    random_model, mesh_builder_xyz, refine_tree_xyz, active_from_xyz
 )
 from .curvutils import volTetra, faceInfo, indexCube
 from .interputils import interpmat
@@ -18,3 +18,5 @@ from .coordutils import (
     rotatePointsFromNormals, rotationMatrixFromNormals, cyl2cart, cart2cyl
     # rotate_vec_cyl2cart
 )
+
+from .io_utils import download
