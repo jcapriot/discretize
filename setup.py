@@ -47,8 +47,7 @@ build_requires = [
     'numpy>=1.8',
     'scipy>=0.13',
     'cython>=0.2',
-    'properties',
-    'vectormath',
+    'pydantic',
     ]
 
 metadata = dict(

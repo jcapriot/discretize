@@ -260,7 +260,7 @@ cdef class _TreeMesh:
         self.wrapper = new PyWrapper()
         self.tree = new c_Tree()
 
-    def __init__(self, h, x0):
+    def __init_tree__(self, h, x0):
         nx2 = 2*len(h[0])
         ny2 = 2*len(h[1])
         self._dim = len(x0)
@@ -467,7 +467,7 @@ cdef class _TreeMesh:
         cdef Node *node
         cdef Edge *edge
         cdef Face *face
-        if self.tree.n_dim > 0: # Will only happen if __init__ has been called
+        if self.tree.n_dim > 0: # Will only happen if __init_tree_ has been called
             shift = np.empty(dim, dtype=np.float64)
 
             shift[0] = self._x0[0] - self._xs[0]

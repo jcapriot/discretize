@@ -11,12 +11,6 @@ class InnerProducts(object):
     """This is a base for the discretize mesh classes.
     This mixIn creates the all the inner product matrices that you need!
     """
-    def __init__(self):
-        raise Exception(
-            'InnerProducts is a base class providing inner product matrices '
-            'for meshes and cannot run on its own. Inherit to your favorite '
-            'Mesh class.'
-        )
 
     def getFaceInnerProduct(self, prop=None, invProp=False, invMat=False, doFast=True):
         """Generate the face inner product matrix

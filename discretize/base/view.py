@@ -23,8 +23,6 @@ class TensorView(object):
 
     This class is inherited by TensorMesh
     """
-    def __init__(self):
-        pass
 
     # def components(self):
 
@@ -1257,8 +1255,8 @@ class Slicer(object):
     >>> plt.show()
 
 
-    **Parameters**
-
+    Parameters
+    ----------
     v : array
         Data array of length self.nC.
 

@@ -3,114 +3,143 @@ Base classes for all discretize meshes
 """
 
 import numpy as np
-import properties
 import os
 import json
 
+from ..pydantic.base_object import BaseDiscretize
+from ..pydantic.typing import Array, UnitaryArray
+try:
+    from typing import Instance
+except ImportError:
+    from typing_extensions import Instance
+from pydantic import validator, root_validator
 from ..utils import mkvc
 from ..mixins import InterfaceMixins
 
 
-class BaseMesh(properties.HasProperties, InterfaceMixins):
-    """
-    BaseMesh does all the counting you don't want to do.
-    BaseMesh should be inherited by meshes with a regular structure.
-    """
+class BaseMesh(BaseDiscretize, InterfaceMixins):
+    """The base type for regular structured meshes
 
-    _REGISTRY = {}
+    `BaseMesh` does all the counting you don't want to do.
+    `BaseMesh` should be inherited by meshes with a regular structure.
+
+    Attributes
+    ----------
+    shape : numpy.ndarray
+    x0 : numpy.ndarray
+    reference_system : str
+    axis_u : numpy.ndarray
+    axis_v : numpy.ndarray
+    axis_w : numpy.ndarray
+    dim
+    nC
+    nN
+    nE
+    vnE
+    nEx
+    nEy
+    nEz
+    nF
+    vnF
+    nFx
+    nFy
+    nFz
+    normals
+    tangents
+    reference_is_rotated
+    rotation_matrix
+    """
 
     # Properties
-    _n = properties.Array(
-        "number of cells in each direction (dim, )",
-        dtype=int,
-        required=True,
-        shape=('*',)
-    )
+    shape: Array[int, -1]
+    x0: Array[float, -1]
+    # Optional properties
+    axis_u: UnitaryArray[float, 3] = [1.0, 0.0, 0.0]
+    axis_v: UnitaryArray[float, 3] = [0.0, 1.0, 0.0]
+    axis_w: UnitaryArray[float, 3] = [0.0, 0.0, 1.0]
 
-    x0 = properties.Array(
-        "origin of the mesh (dim, )",
-        dtype=(float, int),
-        shape=('*',),
-        required=True,
-    )
+    reference_system: Instance['cartesian', 'cylindrical', 'spherical'] = 'cartesian'
 
     # Instantiate the class
-    def __init__(self, n=None, x0=None, **kwargs):
-        if n is not None:
-            self._n = n  # number of dimensions
+    def __init__(self, shape, x0, **kwargs):
+        """BaseMesh(shape, x0, reference_system='cartesian', axis_u=[1, 0, 0], axis_v=[0, 1, 0], axis_w=[0, 0, 1])
 
-        if x0 is None:
-            self.x0 = np.zeros(len(self._n))
-        else:
-            self.x0 = x0
-
-        super(BaseMesh, self).__init__(**kwargs)
+        Parameters
+        ----------
+        shape : array_like
+            list of integers, must be have length 3 or less
+        x0 : array_like
+            list of floats defining the origin of the mesh. Must also have length 3 or less
+        reference_system: ['cartesian', 'cylindrical', 'spherical'], optional
+            The type of coordinate reference frame. Can take on the values
+            cartesian, cylindrical, or spherical. Abbreviations of these are allowed.
+        axis_u : array_like, optional
+            length three array of floats for orientation direction of axis 1, defaults to [1, 0, 0]
+        axis_v : array_like, optional
+            length three array of floats for orientation direction of axis 2, defaults to [0, 1, 0]
+        axis_w : array_like, optional
+            length three array of floats for orientation direction of axis 2, defaults to [0, 0, 1]
+        """
+        super().__init__(shape=shape, x0=x0)
 
     # Validators
-    @properties.validator('_n')
-    def _check_n_shape(self, change):
-        if not (
-            not isinstance(change['value'], properties.utils.Sentinel) and
-            change['value'] is not None
-        ):
-            raise Exception("Cannot delete n. Instead, create a new mesh")
-
-        change['value'] = np.array(change['value'], dtype=int).ravel()
-        if len(change['value']) > 3:
-            raise Exception(
-                "Dimensions of {}, which is higher than 3 are not "
-                "supported".format(change['value'])
-            )
-
-        if np.any(change['previous'] != properties.undefined):
+    @validator('shape')
+    def _check_shape(cls, v, values, **kwargs):
+        if len(v) > 3:
+            raise ValueError(f"Dimensions of {v}, which is higher than 3, are "
+                             "not supported")
+        if 'x0' in values and len(values['x0']) != len(v):
             # can't change dimension of the mesh
-            if len(change['previous']) != len(change['value']):
-                raise Exception(
-                    "Cannot change dimensionality of the mesh. Expected {} "
-                    "dimensions, got {} dimensions".format(
-                        len(change['previous']), len(change['value'])
-                    )
+            raise ValueError(
+                "Cannot change dimensionality of the mesh. Expected {} "
+                "dimensions, got {} dimensions".format(
+                    len(change['previous']), len(change['value'])
                 )
-
-            # check that if h has been set, sizes still agree
-            if getattr(self, 'h', None) is not None and len(self.h) > 0:
-                for i in range(len(change['value'])):
-                    if len(self.h[i]) != change['value'][i]:
-                        raise Exception(
-                            "Mismatched shape of n. Expected {}, len(h[{}]), got "
-                            "{}".format(
-                                len(self.h[i]), i, change['value'][i]
-                            )
-                        )
-
+            )
+        if 'nodes' in values:
             # check that if nodes have been set for curvi mesh, sizes still
             # agree
-            if (
-                getattr(self, 'nodes', None) is not None and
-                len(self.nodes) > 0
-            ):
-                for i in range(len(change['value'])):
-                    if self.nodes[0].shape[i]-1 != change['value'][i]:
-                        raise Exception(
-                            "Mismatched shape of n. Expected {}, len(nodes[{}]), "
-                            "got {}".format(
-                                self.nodes[0].shape[i]-1, i, change['value'][i]
-                            )
-                        )
+            nodes = values['nodes']
+            node_shape = np.array(nodes[0].shape)-1
+            if np.any(v != node_shape):
+                raise TypeError(
+                    f"Mismatched shape of n. Expected {node_shape}, "
+                    f"got {v}"
+                )
 
-    @properties.validator('x0')
-    def _check_x0(self, change):
-        if not (
-            not isinstance(change['value'], properties.utils.Sentinel) and
-            change['value'] is not None
-        ):
-            raise Exception("n must be set prior to setting x0")
-
-        if len(self._n) != len(change['value']):
-            raise Exception(
-                "Dimension mismatch. x0 has length {} != len(n) which is "
-                "{}".format(len(x0), len(n))
+    @validator('x0')
+    def _check_x0(cls, v, values, **kwargs):
+        if 'shape' in values and len(v) != len(values['shape']):
+            raise ValueError(
+                f"Dimension mismatch. x0 has length {len(v)} != len(shape) which is "
+                f"{len(values['shape'])}"
             )
+
+    @root_validator
+    def _check_ortho(cls, values):
+        axis_u = values.get('axis_u')
+        axis_v = values.get('axis_v')
+        axis_w = values.get('axis_w')
+        if axis_u is not None and axis_v is not None and axis_w is not None and (
+                np.abs(axis_u.dot(axis_w)) > 1E-6 or
+                np.abs(axis_v.dot(axis_w)) > 1E-6 or
+                np.abs(axis_u.dot(axis_v)) > 1E-6
+            ):
+            raise ValueError('axis_u, axis_v, and axis_w must be orthogonal')
+
+    @validator('reference_system', pre=True)
+    def _validate_reference_system(cls, v):
+        v = v.lower()
+        abrevs = {
+            'car': 'cartesian',
+            'cart': 'cartesian',
+            'cy': 'cylindrical',
+            'cyl': 'cylindrical',
+            'sph': 'spherical',
+        }
+        if v in abrevs:
+            v = abrevs[v]
+        return v
 
     @property
     def dim(self):
@@ -121,7 +150,7 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
         int
             dimension of the mesh
         """
-        return len(self._n)
+        return len(self.shape)
 
     @property
     def nC(self):
@@ -144,7 +173,10 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
 
             print(mesh.nC)
         """
-        return int(self._n.prod())
+        return int(self.shape.prod())
+
+    def __len__(self):
+        return self.nC
 
     @property
     def nN(self):
@@ -167,7 +199,7 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
 
             print(mesh.nN)
         """
-        return int((self._n+1).prod())
+        return int((self.shape+1).prod())
 
     @property
     def nEx(self):
@@ -178,7 +210,7 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
         nEx : int
 
         """
-        return int((self._n + np.r_[0, 1, 1][:self.dim]).prod())
+        return int((self.shape + np.r_[0, 1, 1][:self.dim]).prod())
 
     @property
     def nEy(self):
@@ -186,13 +218,12 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
 
         Returns
         -------
-        nEy : int
-
-
+        nEy : int or None
+            None if dimension < 2
         """
         if self.dim < 2:
             return None
-        return int((self._n + np.r_[1, 0, 1][:self.dim]).prod())
+        return int((self.shape + np.r_[1, 0, 1][:self.dim]).prod())
 
     @property
     def nEz(self):
@@ -200,13 +231,12 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
 
         Returns
         -------
-        nEz : int
-
-
+        nEz : int or None
+            None if dimension < 3
         """
         if self.dim < 3:
             return None
-        return int((self._n + np.r_[1, 1, 0][:self.dim]).prod())
+        return int((self.shape + np.r_[1, 1, 0][:self.dim]).prod())
 
     @property
     def vnE(self):
@@ -214,7 +244,8 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
 
         Returns
         -------
-        vnE : numpy.ndarray = [nEx, nEy, nEz], (dim, )
+        vnE : numpy.ndarray
+            [nEx, ], [nEx, nEy, ], or [nEx, nEy, nEz] (depending on dimensions)
 
         .. plot::
             :include-source:
@@ -235,7 +266,8 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
 
         Returns
         -------
-        nE : int = sum([nEx, nEy, nEz])
+        nE : int
+            sum([nEx, nEy, nEz])
 
         """
         return int(self.vnE.sum())
@@ -244,39 +276,46 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
     def nFx(self):
         """Number of x-faces
 
-        :rtype: int
-        :return: nFx
+        Returns
+        -------
+        nFx : int
         """
-        return int((self._n + np.r_[1, 0, 0][:self.dim]).prod())
+        return int((self.shape + np.r_[1, 0, 0][:self.dim]).prod())
 
     @property
     def nFy(self):
         """Number of y-faces
 
-        :rtype: int
-        :return: nFy
+        Returns
+        -------
+        nFy : int or None
+            None if dimension < 2
         """
         if self.dim < 2:
             return None
-        return int((self._n + np.r_[0, 1, 0][:self.dim]).prod())
+        return int((self.shape + np.r_[0, 1, 0][:self.dim]).prod())
 
     @property
     def nFz(self):
         """Number of z-faces
 
-        :rtype: int
-        :return: nFz
+        Returns
+        -------
+        nFz : int or None
+            None if dimension <3
         """
         if self.dim < 3:
             return None
-        return int((self._n + np.r_[0, 0, 1][:self.dim]).prod())
+        return int((self.shape + np.r_[0, 0, 1][:self.dim]).prod())
 
     @property
     def vnF(self):
         """Total number of faces in each direction
 
-        :rtype: numpy.ndarray
-        :return: [nFx, nFy, nFz], (dim, )
+        Returns
+        -------
+        vnF : numpy.ndarray
+            [nFx, ], [nFx, nFy], or [nFx, nFy, nFz] (depending on dimension)
 
         .. plot::
             :include-source:
@@ -295,18 +334,22 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
     def nF(self):
         """Total number of faces.
 
-        :rtype: int
-        :return: sum([nFx, nFy, nFz])
+        Returns
+        -------
+        nF : int
+            sum([nFx, nFy, nFz])
 
         """
         return int(self.vnF.sum())
 
     @property
     def normals(self):
-        """Face Normals
+        """Vectors normal to each Face
 
-        :rtype: numpy.ndarray
-        :return: normals, (sum(nF), dim)
+        Returns
+        -------
+        normals : numpy.ndarray
+            float array of shape (nF, dim)
         """
         if self.dim == 2:
             nX = np.c_[
@@ -330,10 +373,12 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
 
     @property
     def tangents(self):
-        """Edge Tangents
+        """Vectors tangent to each Edge
 
-        :rtype: numpy.ndarray
-        :return: normals, (sum(nE), dim)
+        Returns
+        -------
+        tangents : numpy.ndarray
+            float array of shape (nE, dim)
         """
         if self.dim == 2:
             tX = np.c_[
@@ -356,13 +401,20 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
             return np.r_[tX, tY, tZ]
 
     def projectFaceVector(self, fV):
-        """Given a vector, fV, in cartesian coordinates, this will project
-        it onto the mesh using the normals
+        """Project a vector onto the face normals
 
-        :param numpy.ndarray fV: face vector with shape (nF, dim)
-        :rtype: numpy.ndarray
-        :return: projected face vector, (nF, )
+        Given a vector, fV, in cartesian coordinates, this will project
+        it onto the mesh using the normals.
 
+        Parameters
+        ----------
+        fV : numpy.ndarray
+            face vector with shape (nF, dim)
+
+        Returns
+        -------
+        numpy.ndarray
+            projected face vector, (nF, )
         """
         if not isinstance(fV, np.ndarray):
             raise Exception('fV must be an ndarray')
@@ -375,13 +427,20 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
         return np.sum(fV*self.normals, 1)
 
     def projectEdgeVector(self, eV):
-        """Given a vector, eV, in cartesian coordinates, this will project
+        """Project a vector onto the edge tangents
+
+        Given a vector, eV, in cartesian coordinates, this will project
         it onto the mesh using the tangents
 
-        :param numpy.ndarray eV: edge vector with shape (nE, dim)
-        :rtype: numpy.ndarray
-        :return: projected edge vector, (nE, )
+        Parameters
+        ----------
+        eV : numpy.ndarray
+            edge vector with shape (nE, dim)
 
+        Returns
+        -------
+        numpy.ndarray
+            projected edge vector, (nE, )
         """
         if not isinstance(eV, np.ndarray):
             raise Exception('eV must be an ndarray')
@@ -396,54 +455,32 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
     def save(self, filename='mesh.json', verbose=False):
         """
         Save the mesh to json
-        :param str file: filename for saving the casing properties
-        :param str directory: working directory for saving the file
+
+        Parameters
+        ----------
+        filename : str
+            filename for saving the casing properties
+        verbose : bool, optional
+            verbose mode printout flag
         """
 
         f = os.path.abspath(filename)  # make sure we are working with abs path
         with open(f, 'w') as outfile:
-            json.dump(self.serialize(), outfile)
+            json.dump(self, outfile)
 
         if verbose is True:
             print('Saved {}'.format(f))
 
         return f
 
-    def copy(self):
-        """
-        Make a copy of the current mesh
-        """
-        return properties.copy(self)
-
-    axis_u = properties.Vector3(
-        'Vector orientation of u-direction. For more details see the docs for the :attr:`~discretize.base.BaseMesh.rotation_matrix` property.',
-        default='X',
-        length=1
-    )
-    axis_v = properties.Vector3(
-        'Vector orientation of v-direction. For more details see the docs for the :attr:`~discretize.base.BaseMesh.rotation_matrix` property.',
-        default='Y',
-        length=1
-    )
-    axis_w = properties.Vector3(
-        'Vector orientation of w-direction. For more details see the docs for the :attr:`~discretize.base.BaseMesh.rotation_matrix` property.',
-        default='Z',
-        length=1
-    )
-
-    @properties.validator
-    def _validate_orientation(self):
-        """Check if axes are orthogonal"""
-        if not (np.abs(self.axis_u.dot(self.axis_v) < 1e-6) and
-                np.abs(self.axis_v.dot(self.axis_w) < 1e-6) and
-                np.abs(self.axis_w.dot(self.axis_u) < 1e-6)):
-            raise ValueError('axis_u, axis_v, and axis_w must be orthogonal')
-        return True
-
     @property
     def reference_is_rotated(self):
         """True if the axes are rotated from the traditional <X,Y,Z> system
         with vectors of :math:`(1,0,0)`, :math:`(0,1,0)`, and :math:`(0,0,1)`
+
+        Returns
+        -------
+        bool
         """
         if (    np.allclose(self.axis_u, (1, 0, 0)) and
                 np.allclose(self.axis_v, (0, 1, 0)) and
@@ -453,7 +490,9 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
 
     @property
     def rotation_matrix(self):
-        """Builds a rotation matrix to transform coordinates from their coordinate
+        """Rotation matrix of the mesh if local coordinates are rotated.
+
+        Builds a rotation matrix to transform coordinates from their coordinate
         system into a conventional cartesian system. This is built off of the
         three `axis_u`, `axis_v`, and `axis_w` properties; these mapping
         coordinates use the letters U, V, and W (the three letters preceding X,
@@ -467,94 +506,129 @@ class BaseMesh(properties.HasProperties, InterfaceMixins):
         switching between the two while still maintaing the connectivity of the
         mesh's cells. For a visual example of this, please see the figure in the
         docs for the :class:`~discretize.mixins.vtkModule.InterfaceVTK`.
+
+        Returns
+        -------
+        numpy.ndarray
+            array of shape (3, 3)
         """
         return np.array([self.axis_u, self.axis_v, self.axis_w])
 
 
-    reference_system = properties.String(
-        'The type of coordinate reference frame. Can take on the values ' +
-        'cartesian, cylindrical, or spherical. Abbreviations of these are allowed.',
-        default='cartesian',
-        change_case='lower',
-    )
-
-    @properties.validator
-    def _validate_reference_system(self):
-        """Check if the reference system is of a known type."""
-        choices = ['cartesian', 'cylindrical', 'spherical']
-        # Here are a few abbreviations that users can harnes
-        abrevs = {
-            'car': choices[0],
-            'cart': choices[0],
-            'cy': choices[1],
-            'cyl': choices[1],
-            'sph': choices[2],
-        }
-        # Get the name and fix it if it is abbreviated
-        self.reference_system = abrevs.get(self.reference_system, self.reference_system)
-        if self.reference_system not in choices:
-            raise ValueError('Coordinate system ({}) unknown.'.format(self.reference_system))
-        return True
-
-
 class BaseRectangularMesh(BaseMesh):
-    """
-    BaseRectangularMesh
-    """
+    """The base type for Rectangular meshes
 
+    `BaseRectangularMesh` adds a few attributes to the `BaseMesh` that are useful
+    for rectangularly structured meshes, as well as a useful reshaping command.
+    `BaseRectangularMesh` should be inherited by meshes with a rectangular structure.
 
-    def __init__(self, n=None, x0=None, **kwargs):
-        BaseMesh.__init__(self, n=n, x0=x0, **kwargs)
+    Parameters
+    ----------
+    shape : array_like
+        list of integers, must be have length 3 or less
+    x0 : array_like
+        list of floats defining the origin of the mesh. Must also have length 3 or less
+    reference_system: ['cartesian', 'cylindrical', 'spherical']
+        The type of coordinate reference frame. Can take on the values
+        cartesian, cylindrical, or spherical. Abbreviations of these are allowed.
+    axis_u : array_like, optional
+        length three array of floats for orientation direction of axis 1, defaults to [1, 0, 0]
+    axis_v : array_like, optional
+        length three array of floats for orientation direction of axis 2, defaults to [0, 1, 0]
+    axis_w : array_like, optional
+        length three array of floats for orientation direction of axis 2, defaults to [0, 0, 1]
+
+    Attributes
+    ----------
+    shape : numpy.ndarray
+    x0 : numpy.ndarray
+    dim
+    nC
+    nCx
+    nCy
+    nCz
+    vnC
+    nN
+    nNx
+    nNy
+    nNz
+    vnN
+    nE
+    vnE
+    nEx
+    nEy
+    nEz
+    vnEx
+    vnEy
+    vnEz
+    nF
+    vnF
+    nFx
+    nFy
+    nFz
+    vnFx
+    vnFy
+    vnFz
+    normals
+    tangents
+    reference_is_rotated
+    rotation_matrix
+    """
 
     @property
     def nCx(self):
         """Number of cells in the x direction
 
-        :rtype: int
-        :return: nCx
+        Returns
+        -------
+        nCx : int
         """
-        return int(self._n[0])
+        return int(self.shape[0])
 
     @property
     def nCy(self):
         """Number of cells in the y direction
 
-        :rtype: int
-        :return: nCy or None if dim < 2
+        Returns
+        -------
+        nCy : int or None
+            returns None if dimension < 2
         """
         if self.dim < 2:
             return None
-        return int(self._n[1])
+        return int(self.shape[1])
 
     @property
     def nCz(self):
         """Number of cells in the z direction
 
-        :rtype: int
-        :return: nCz or None if dim < 3
+        Returns
+        -------
+        nCz : int or None
+            returns None if dimension < 3
         """
         if self.dim < 3:
             return None
-        return int(self._n[2])
+        return int(self.shape[2])
 
     @property
     def vnC(self):
         """Total number of cells in each direction
 
-        :rtype: numpy.ndarray
-        :return: [nCx, nCy, nCz]
+        Returns
+        -------
+        vnC : numpy.ndarray
+            [nCx, ], [nCx, nCy, ], or [nCx, nCy, nCz] (depending on dimension)
         """
-        return np.array(
-            [x for x in [self.nCx, self.nCy, self.nCz] if x is not None],
-            dtype=int
-        )
+        return self.shape
 
     @property
     def nNx(self):
         """Number of nodes in the x-direction
 
-        :rtype: int
-        :return: nNx
+        Returns
+        -------
+        nNx : int
         """
         return self.nCx + 1
 
@@ -562,8 +636,10 @@ class BaseRectangularMesh(BaseMesh):
     def nNy(self):
         """Number of nodes in the y-direction
 
-        :rtype: int
-        :return: nNy or None if dim < 2
+        Returns
+        -------
+        nNy : int or None
+            returns None if dimension <2
         """
         if self.dim < 2:
             return None
@@ -573,8 +649,10 @@ class BaseRectangularMesh(BaseMesh):
     def nNz(self):
         """Number of nodes in the z-direction
 
-        :rtype: int
-        :return: nNz or None if dim < 3
+        Returns
+        -------
+        nNz : int or None
+            returns None if dimension <3
         """
         if self.dim < 3:
             return None
@@ -584,20 +662,21 @@ class BaseRectangularMesh(BaseMesh):
     def vnN(self):
         """Total number of nodes in each direction
 
-        :rtype: numpy.ndarray
-        :return: [nNx, nNy, nNz]
+        Returns
+        -------
+        vnC : numpy.ndarray
+            [nNx, ], [nNx, nNy, ], or [nNx, nNy, nNz] (depending on dimension)
         """
-        return np.array(
-            [x for x in [self.nNx, self.nNy, self.nNz] if x is not None],
-            dtype=int
-        )
+        return self.shape+1
 
     @property
     def vnEx(self):
         """Number of x-edges in each direction
 
-        :rtype: numpy.ndarray
-        :return: vnEx
+        Returns
+        -------
+        vnEx : numpy.ndarray
+            [nCx, ], [nCx, nNy], or [nCx, nNy, nNz] (depending on dimension)
         """
         return np.array(
             [x for x in [self.nCx, self.nNy, self.nNz] if x is not None],
@@ -608,8 +687,10 @@ class BaseRectangularMesh(BaseMesh):
     def vnEy(self):
         """Number of y-edges in each direction
 
-        :rtype: numpy.ndarray
-        :return: vnEy or None if dim < 2
+        Returns
+        -------
+        vnEy : numpy.ndarray or None
+            None, [nNx, nCy], or [nNx, nCy, nNz] (depending on dimension)
         """
         if self.dim < 2:
             return None
@@ -622,8 +703,10 @@ class BaseRectangularMesh(BaseMesh):
     def vnEz(self):
         """Number of z-edges in each direction
 
-        :rtype: numpy.ndarray
-        :return: vnEz or None if dim < 3
+        Returns
+        -------
+        vnEz : numpy.ndarray or None
+            None or [nNx, nNy, nCz] (depending on dimension)
         """
         if self.dim < 3:
             return None
@@ -636,8 +719,10 @@ class BaseRectangularMesh(BaseMesh):
     def vnFx(self):
         """Number of x-faces in each direction
 
-        :rtype: numpy.ndarray
-        :return: vnFx
+        Returns
+        -------
+        vnFx : numpy.ndarray
+            [nNx, ], [nNx, nCy], or [nNx, nCy, nCz] (depending on dimension)
         """
         return np.array(
             [x for x in [self.nNx, self.nCy, self.nCz] if x is not None],
@@ -648,8 +733,10 @@ class BaseRectangularMesh(BaseMesh):
     def vnFy(self):
         """Number of y-faces in each direction
 
-        :rtype: numpy.ndarray
-        :return: vnFy or None if dim < 2
+        Returns
+        -------
+        vnFy : numpy.ndarray or None
+            None, [nCx, nNy], or [nCx, nNy, nCz] (depending on dimension)
         """
         if self.dim < 2:
             return None
@@ -662,8 +749,10 @@ class BaseRectangularMesh(BaseMesh):
     def vnFz(self):
         """Number of z-faces in each direction
 
-        :rtype: numpy.ndarray
-        :return: vnFz or None if dim < 3
+        Returns
+        -------
+        vnFz : numpy.ndarray or None
+            None or [nCx, nCy, nNz] (depending on dimension)
         """
         if self.dim < 3:
             return None
@@ -672,130 +761,47 @@ class BaseRectangularMesh(BaseMesh):
             dtype=int
         )
 
-    ##################################
-    # Redo the numbering so they are dependent of the vector numbers
-    ##################################
-
-    @property
-    def nC(self):
-        """Total number of cells
-
-        :rtype: int
-        :return: nC
-        """
-        return int(self.vnC.prod())
-
-    @property
-    def nN(self):
-        """Total number of nodes
-
-        :rtype: int
-        :return: nN
-        """
-        return int(self.vnN.prod())
-
-    @property
-    def nEx(self):
-        """Number of x-edges
-
-        :rtype: int
-        :return: nEx
-        """
-        return int(self.vnEx.prod())
-
-    @property
-    def nEy(self):
-        """Number of y-edges
-
-        :rtype: int
-        :return: nEy
-        """
-        if self.dim < 2:
-            return
-        return int(self.vnEy.prod())
-
-    @property
-    def nEz(self):
-        """Number of z-edges
-
-        :rtype: int
-        :return: nEz
-        """
-        if self.dim < 3:
-            return
-        return int(self.vnEz.prod())
-
-    @property
-    def nFx(self):
-        """Number of x-faces
-
-        :rtype: int
-        :return: nFx
-        """
-        return int(self.vnFx.prod())
-
-    @property
-    def nFy(self):
-        """Number of y-faces
-
-        :rtype: int
-        :return: nFy
-        """
-        if self.dim < 2:
-            return
-        return int(self.vnFy.prod())
-
-    @property
-    def nFz(self):
-        """Number of z-faces
-
-        :rtype: int
-        :return: nFz
-        """
-        if self.dim < 3:
-            return
-        return int(self.vnFz.prod())
-
     def r(self, x, xType='CC', outType='CC', format='V'):
-        """`r` is a quick reshape command that will do the best it
+        """A quick reshape command
+
+        `r` is a quick reshape command that will do the best it
         can at giving you what you want.
 
         For example, you have a face variable, and you want the x
         component of it reshaped to a 3D matrix.
 
-        `r` can fulfil your dreams::
+        `r` can fulfil your dreams.
 
-            mesh.r(V, 'F', 'Fx', 'M')
-                   |   |     |    |
-                   |   |     |    {
-                   |   |     |      How: 'M' or ['V'] for a matrix
-                   |   |     |      (ndgrid style) or a vector (n x dim)
-                   |   |     |    }
-                   |   |     {
-                   |   |       What you want: ['CC'], 'N',
-                   |   |                       'F', 'Fx', 'Fy', 'Fz',
-                   |   |                       'E', 'Ex', 'Ey', or 'Ez'
-                   |   |     }
-                   |   {
-                   |     What is it: ['CC'], 'N',
-                   |                  'F', 'Fx', 'Fy', 'Fz',
-                   |                  'E', 'Ex', 'Ey', or 'Ez'
-                   |   }
-                   {
-                     The input: as a list or ndarray
-                   }
+        Parameters
+        ----------
+        x :  numpy.ndarray or list of numpy.ndarrays
+            The input arrays to reshape
+        xType : {'CC', 'N', 'F', 'Fx', 'Fy', 'Fz', 'E', 'Ex', 'Ey', 'Ez'}
+            Where the values of the input array are located.
+        outType : {'CC', 'N', 'F', 'Fx', 'Fy', 'Fz', 'E', 'Ex', 'Ey', 'Ez'}
+            Where the values of the output array(s) are located.
+        format : {'V', 'M'}
+            How to shape the output as either a vector 'V' of shape (n, dim), or
+            as an ndgrid style matrix
+
+        Notes
+        -----
+
+        You cannot change types while reshaping, i.e. if xType is 'Fx', outType must be 'Fx',
+        or if xType is 'F' outType can be 'Fx', 'Fy', or 'Fz'.
 
 
-        For example::
+        Examples
+        --------
 
-            # Separates each component of the Ex grid into 3 matrices
-            Xex, Yex, Zex = r(mesh.gridEx, 'Ex', 'Ex', 'M')
+        Separates each component of the Ex grid into 3 matrices
+        >>> Xex, Yex, Zex = r(mesh.gridEx, 'Ex', 'Ex', 'M')
 
-            # Given an edge vector, return just the x edges as a vector
-            XedgeVector = r(edgeVector, 'E', 'Ex', 'V')
+        Given an edge vector, return just the x edges as a vector
+        >>> XedgeVector = r(edgeVector, 'E', 'Ex', 'V')
 
-            # Separates each component of the edgeVector into 3 vectors
-            eX, eY, eZ = r(edgeVector, 'E', 'E', 'V')
+        Separates each component of the edgeVector into 3 vectors
+        >>> eX, eY, eZ = r(edgeVector, 'E', 'E', 'V')
         """
 
         allowed_xType = [
@@ -861,7 +867,7 @@ class BaseRectangularMesh(BaseMesh):
         def switchKernal(xx):
             """Switches over the different options."""
             if xType in ['CC', 'N']:
-                nn = (self._n) if xType == 'CC' else (self._n+1)
+                nn = (self.shape) if xType == 'CC' else (self.shape+1)
                 if xx.size != np.prod(nn):
                     raise Exception(
                         "Number of elements must not change."

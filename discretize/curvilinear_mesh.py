@@ -1,12 +1,12 @@
 from __future__ import print_function
 import numpy as np
-import properties
-from properties.math import TYPE_MAPPINGS
+from .pydantic.typing import Array
+from typing import List
+from pydantic import validator
 
 from discretize import utils
-from .base import BaseRectangularMesh
+from .base import BaseRectangularMesh, InnerProducts
 from discretize.DiffOperators import DiffOperators
-from discretize.InnerProducts import InnerProducts
 from discretize.View import CurviView
 
 
@@ -45,50 +45,46 @@ class CurvilinearMesh(
 
     _meshType = 'Curv'
 
-    nodes = properties.List(
-        "List of arrays describing the node locations",
-        prop=properties.Array(
-            "node locations in an n-dimensional array",
-            shape={('*', '*'), ('*', '*', '*')}
-        ),
-        min_length=2,
-        max_length=3
-    )
+    nodes = List[Array[float, None]]
 
     def __init__(self, nodes=None, **kwargs):
 
-        self.nodes = nodes
-
-        if '_n' in kwargs.keys():
-            n = kwargs.pop('_n')
-            assert (n == np.array(self.nodes[0].shape)-1).all(), (
-                "Unexpected n-values. {} was provided, {} was expected".format(
-                    n, np.array(self.nodes[0].shape)-1
-                )
-            )
-        else:
-            n = np.array(self.nodes[0].shape)-1
-
-        BaseRectangularMesh.__init__(self, n, **kwargs)
+        nodes = self._easy_validate(nodes)
+        shape = nodes[0].shape
+        x0 = [node[0, 0, 0] for node in nodes]
+        kwargs.pop('shape', None)
+        kwargs.pop('x0', None)
+        super().__init__(nodes=nodes, shape=shape, x0=x0, **kwargs)
 
         # Save nodes to private variable _gridN as vectors
         self._gridN = np.ones((self.nodes[0].size, self.dim))
         for i, node_i in enumerate(self.nodes):
             self._gridN[:, i] = utils.mkvc(node_i.astype(float))
 
-    @properties.validator('nodes')
-    def _check_nodes(self, change):
-        assert len(change['value']) > 1, "len(node) must be greater than 1"
+    @validator('nodes')
+    def _check_nodes(cls, v, values, **kwargs):
+        # check the length of the nodes list is 2 or 3
+        dim = len(v)
+        if dim not in [2, 3]:
+            raise ValueError(f"len(nodes) must be 2 or 3, not {len(v)}")
 
-        for i, change['value'][i] in enumerate(change['value']):
-            assert change['value'][i].shape == change['value'][0].shape, (
-                "change['value'][{0:d}] is not the same shape as "
-                "change['value'][0]".format(i)
-            )
+        # check all vi have shapes of 2 or 3 dimensions, depending on len(v)
+        for i, vi in enumerate(v):
+            if len(vi.shape) != dim:
+                raise ValueError(f"len(nodes[{i}].shape) must be {dim}, not {len(vi.shape)}")
 
-        assert len(change['value'][0].shape) == len(change['value']), (
-            "Dimension mismatch"
-        )
+        # check all vi have the same shape
+        v0_shape = v[0].shape
+        if v0_shape != v[1].shape or (len(v) == 3 and v0_shape != v[2].shape):
+            raise ValueError('Nodes must all have the same shape')
+
+        # if shape has been set, ensure that the values are still a valid shape
+        if 'shape' in values:
+            shape = values['shape']
+            for i, vi in enumerate(v):
+                if np.any(shape != vi.shape):
+                    raise ValueError(f"nodes[{i}] must have shape {shape}, not {vi.shape}")
+        return v
 
     @property
     def gridCC(self):

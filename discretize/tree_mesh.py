@@ -113,27 +113,26 @@ class TreeMesh(_TreeMesh, BaseTensorMesh, InnerProducts, TreeMeshIO):
     _meshType = 'TREE'
 
     #inheriting stuff from BaseTensorMesh that isn't defined in _QuadTree
-    def __init__(self, h=None, x0=None, **kwargs):
-        if 'h' in kwargs.keys():
-            h = kwargs.pop('h')
-        if 'x0' in kwargs.keys():
-            x0 = kwargs.pop('x0')
-        # print(h, x0)
-        BaseTensorMesh.__init__(self, h, x0)#TODO:, **kwargs) # pass the kwargs for copy/paste
+    def __init__(self, h, x0, **kwargs):
+        # pop these off the kwargs if they're in there
+        levels = kwargs.pop('cell_levels', None)
+        inds = kwargs.pop('cell_indexes', None)
 
-        nx = len(self.h[0])
-        ny = len(self.h[1])
-        nz = len(self.h[2]) if self.dim == 3 else 2
-        def is_pow2(num): return ((num & (num - 1)) == 0) and num != 0
-        if not (is_pow2(nx) and is_pow2(ny) and is_pow2(nz)):
-            raise ValueError("length of cell width vectors must be a power of 2")
+        super().__init__(h=h, x0=x0, **kwargs)
+
         # Now can initialize cpp tree parent
-        _TreeMesh.__init__(self, self.h, self.x0)
+        self.__init_tree__(self.h, self.x0)
 
-        if 'cell_levels' in kwargs.keys() and 'cell_indexes' in kwargs.keys():
-            inds = kwargs.pop('cell_indexes')
-            levels = kwargs.pop('cell_levels')
+        if levels is not None and inds is not None:
             self.__setstate__((inds, levels))
+
+    @validator('h')
+    def _valid_h_pow2(cls, v):
+        def is_pow2(num): return ((num & (num - 1)) == 0) and num != 0
+        for vi in v:
+            if not is_pow2(len(vi)):
+                raise ValueError("length of cell width arrays must be a power of 2")
+        return v
 
     def __repr__(self):
         """Plain text representation."""
@@ -253,9 +252,9 @@ class TreeMesh(_TreeMesh, BaseTensorMesh, InnerProducts, TreeMeshIO):
 
         return full_tbl
 
-    @properties.validator('x0')
-    def _x0_validator(self, change):
-        self._set_x0(change['value'])
+    @listener('x0')
+    def _x0_listener(self, value):
+        self._set_x0(value)
 
     @property
     def vntF(self):

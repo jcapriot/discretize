@@ -9,6 +9,7 @@ try:
     from .mixins import InterfaceTensorread_vtk
 except ImportError:
     InterfaceTensorread_vtk = object
+import importlib
 
 
 def load_mesh(filename):
@@ -23,8 +24,15 @@ def load_mesh(filename):
     """
     with open(filename, 'r') as outfile:
         jsondict = json.load(outfile)
-        data = BaseMesh.deserialize(jsondict, trusted=True)
-    return data
+
+        # get class from class name
+        module = jsondict.pop('__module__', None)
+        klass = jsondict.pop('__class__', None)
+        if module.split('.')[0] != 'discretize':
+            raise TypeError('Can only load discretize objects')
+        mod = importlib.import_module(module)
+        cls = getattr(mod, klass)
+    return cls(**jsondict)
 
 
 class TensorMeshIO(InterfaceTensorread_vtk):

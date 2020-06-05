@@ -3,11 +3,9 @@ import numpy as np
 
 from discretize import utils
 
-from .base import BaseRectangularMesh, BaseTensorMesh
-from .View import TensorView
-from .DiffOperators import DiffOperators
-from .InnerProducts import InnerProducts
-from .MeshIO import TensorMeshIO
+from .base import BaseRectangularMesh, BaseTensorMesh, DiffOperators, InnerProducts
+from .base.view import TensorView
+from .base.mesh_io import TensorMeshIO
 
 
 class TensorMesh(
@@ -20,6 +18,67 @@ class TensorMesh(
     Any Mesh that has a constant width along the entire axis
     such that it can defined by a single width vector, called 'h'.
 
+    Attributes
+    ----------
+
+    h : list of numpy.ndarray
+    shape : numpy.ndarray
+    x0 : numpy.ndarray
+    reference_system : str
+    axis_u : numpy.ndarray
+    axis_v : numpy.ndarray
+    axis_w : numpy.ndarray
+    dim
+    nC
+    vnC
+    vectorCCx
+    vectorCCy
+    vectorCCz
+    gridCC
+    hx
+    hy
+    hz
+    h_gridded
+    vol
+    nN
+    vectorNx
+    vectorNy
+    vectorNz
+    gridN
+    nE
+    vnE
+    nEx
+    nEy
+    nEz
+    gridEy
+    gridEx
+    gridEz
+    edgeEx
+    edgeEy
+    edgeEz
+    edge
+    nF
+    vnF
+    nFx
+    nFy
+    nFz
+    gridFx
+    gridFy
+    gridFz
+    areaFx
+    areaFy
+    areaFz
+    area
+    normals
+    tangents
+    faceBoundaryInd
+    cellBoundaryInd
+    reference_is_rotated
+    rotation_matrix
+
+    Examples
+    --------
+
     .. plot::
         :include-source:
 
@@ -31,7 +90,6 @@ class TensorMesh(
 
         mesh = discretize.TensorMesh([hx, hy, hz])
         mesh.plotGrid()
-
 
     Example of a padded tensor mesh using
     :func:`discretize.utils.meshTensor`:
@@ -56,9 +114,6 @@ class TensorMesh(
     """
 
     _meshType = 'TENSOR'
-
-    def __init__(self, h=None, x0=None, **kwargs):
-        BaseTensorMesh.__init__(self, h=h, x0=x0, **kwargs)
 
     def __repr__(self):
         """Plain text representation."""
@@ -134,18 +189,11 @@ class TensorMesh(
     def vol(self):
         """Construct cell volumes of the 3D model as 1d array."""
         if getattr(self, '_vol', None) is None:
-            vh = self.h
             # Compute cell volumes
-            if self.dim == 1:
-                self._vol = utils.mkvc(vh[0])
-            elif self.dim == 2:
-                # Cell sizes in each direction
-                self._vol = utils.mkvc(np.outer(vh[0], vh[1]))
-            elif self.dim == 3:
-                # Cell sizes in each direction
-                self._vol = utils.mkvc(
-                    np.outer(utils.mkvc(np.outer(vh[0], vh[1])), vh[2])
-                )
+            vol = self.h[0]
+            for i in range(1, self.dim):
+                vol = vol[:, None] * self.h[i]
+            self._vol = vol.reshape(-1, order='F')
         return self._vol
 
     @property
@@ -289,7 +337,7 @@ class TensorMesh(
 
     @property
     def edge(self):
-        """Construct edge legnths of the 3D model as 1d array."""
+        """Edge lengths of the 3D model as 1d array."""
         if self.dim == 1:
             return self.edgeEx
         elif self.dim == 2:
@@ -301,7 +349,7 @@ class TensorMesh(
     @property
     def faceBoundaryInd(self):
         """
-        Find indices of boundary faces in each direction
+        Indices of boundary faces in each direction
         """
         if self.dim == 1:
             indxd = (self.gridFx == min(self.gridFx))
@@ -325,7 +373,7 @@ class TensorMesh(
     @property
     def cellBoundaryInd(self):
         """
-        Find indices of boundary faces in each direction
+        Indices of boundary faces in each direction
         """
         if self.dim == 1:
             indxd = (self.gridCC == min(self.gridCC))

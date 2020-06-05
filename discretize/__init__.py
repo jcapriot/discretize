@@ -1,8 +1,7 @@
-# from discretize.BaseMesh import BaseMesh
-from discretize.TensorMesh import TensorMesh
-from discretize.CylMesh import CylMesh
-from discretize.CurvilinearMesh import CurvilinearMesh
-from discretize import Tests
+from discretize.tensor_mesh import TensorMesh
+from discretize.cyl_mesh import CylMesh
+from discretize.curvilinear_mesh import CurvilinearMesh
+from discretize import tests
 from discretize.MeshIO import load_mesh
 try:
     from discretize.TreeMesh import TreeMesh
@@ -26,6 +25,9 @@ except ImportError as err:
             to compile the cython code.
             """
             )
+
+# Deprecated
+Tests = tests
 
 __version__   = '0.4.11'
 __author__    = 'SimPEG Team'

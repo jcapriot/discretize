@@ -1,15 +1,15 @@
 from __future__ import print_function
 
 import numpy as np
-import properties
 import scipy.sparse as sp
 from scipy.constants import pi
+import warnings
+from .pydantic.typing import Array
 
 from .utils import (
     kron3, ndgrid, av, speye, ddx, sdiag, interpmat, spzeros, cyl2cart
 )
-from .TensorMesh import BaseTensorMesh, BaseRectangularMesh
-from .InnerProducts import InnerProducts
+from .TensorMesh import BaseTensorMesh, BaseRectangularMesh, InnerProducts
 from .View import CylView
 from .DiffOperators import DiffOperators
 
@@ -57,35 +57,46 @@ class CylMesh(
     _meshType = 'CYL'
     _unitDimensions = [1, 2*np.pi, 1]
 
-    cartesianOrigin = properties.Array(
-        "Cartesian origin of the mesh",
-        dtype=float,
-        shape=('*',)
-    )
+    cartesianOrigin: Array[float, -1] = [0, 0, 0]
 
     def __init__(self, h=None, x0=None, **kwargs):
-        super(CylMesh, self).__init__(h=h, x0=x0, **kwargs)
-        self.reference_system = 'cylindrical'
+        """
+        Parameters
+        ----------
+        h : list of numpy.ndarray, list of list of (int, float) tuples, or list of int
+            Describes the cell widths in each dimension. The length of the list is the
+            dimensionality of the mesh. For more information please see `utils.meshTensor`.
+        x0 : array_like of str or float, or str
+            Origin of the mesh. If the elements of the array are strings, '0', 'C', or 'N'
+            are valid, and correspond to [0, 0, 0], [-hi.sum()/2 for hi in h], or
+            [-hi.sum() for hi in h], respectively.
+        cartesianOrigin : array_like of float, optional
+            origin used for transformation to cartesian coordinates, defaults to [0, 0, 0].
+        """
+        if 'reference_system' in kwargs:
+            ref = kwargs.pop('reference_system')
+        else:
+            ref = 'cylindrical'
+        super(CylMesh, self).__init__(h=h, x0=x0, reference_system=ref, **kwargs)
 
-        if not np.abs(self.hy.sum() - 2*np.pi) < 1e-10:
-            raise AssertionError("The 2nd dimension must sum to 2*pi")
+        if 'cartesianOrigin' not in kwargs:
+            self.cartesianOrigin = [0]*self.dim
 
         if self.dim == 2:
             print('Warning, a disk mesh has not been tested thoroughly.')
 
-        if 'cartesianOrigin' in kwargs.keys():
-            self.cartesianOrigin = kwargs.pop('cartesianOrigin')
-        else:
-            self.cartesianOrigin = np.zeros(self.dim)
+    @validator('h')
+    def _check_hy_sum(cls, v):
+        if not np.abs(v[1].sum() - 2*np.pi) < 1E-10:
+            warnings.warn("The 2nd dimension must sum to 2*pi")
+        return v
 
-    @properties.validator('cartesianOrigin')
-    def check_cartesian_origin_shape(self, change):
-        change['value'] = np.array(change['value'], dtype=float).ravel()
-        if len(change['value']) != self.dim:
-            raise Exception(
-                "Dimension mismatch. The mesh dimension is {}, and the "
-                "cartesianOrigin provided has length {}".format(
-                    self.dim, len(change['value'])
+    @validator('cartesianOrigin')
+    def _check_cartesian_origin_shape(cls, v, values, **kwargs):
+        if 'shape' in values and len(values['shape']) != len(v):
+            raise ValueError(
+                    f"Dimension mismatch. The mesh dimension is {len(values['shape'])}, and the "
+                    f"cartesianOrigin provided has length {len(v)}"
                 )
             )
 

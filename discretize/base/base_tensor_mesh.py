@@ -4,14 +4,15 @@ Base class for tensor-product style meshes
 
 import numpy as np
 import scipy.sparse as sp
-import properties
+from typing import List
+from .pydantic.typing import Array
+from pydantic import validator
 
 from .base_mesh import BaseMesh
 from .. import utils
 
 class BaseTensorMesh(BaseMesh):
-    """
-    Base class for tensor-product style meshes
+    """Base class for tensor-product style meshes
 
     This class contains properites and methods that are common to cartesian
     and cylindrical meshes defined by tensor-produts of vectors describing
@@ -21,86 +22,137 @@ class BaseTensorMesh(BaseMesh):
     a tensor-style mesh (e.g. a spherical mesh) or use the
     :meth:`discretize.TensorMesh` class to create a cartesian tensor mesh.
 
+    Attributes
+    ----------
+
+    h : list of numpy.ndarray
+    shape : numpy.ndarray
+    x0 : numpy.ndarray
+    reference_system : str
+    axis_u : numpy.ndarray
+    axis_v : numpy.ndarray
+    axis_w : numpy.ndarray
+    dim
+    nC
+    vnC
+    vectorCCx
+    vectorCCy
+    vectorCCz
+    gridCC
+    hx
+    hy
+    hz
+    h_gridded
+    nN
+    vectorNx
+    vectorNy
+    vectorNz
+    gridN
+    nE
+    vnE
+    nEx
+    gridEx
+    nEy
+    gridEy
+    nEz
+    gridEz
+    nF
+    vnF
+    nFx
+    gridFx
+    nFy
+    gridFy
+    nFz
+    gridFz
+    normals
+    tangents
+    reference_is_rotated
+    rotation_matrix
     """
+
     _meshType = 'BASETENSOR'
 
     _unitDimensions = [1, 1, 1]
 
     # properties
-    h = properties.List(
-        "h is a list containing the cell widths of the tensor mesh in each "
-        "dimension.",
-        properties.Array(
-            "widths of the tensor mesh in a single dimension",
-            dtype=float,
-            shape=("*",),
-        ),
-        max_length=3
-    )
+    h: List[Array[float, -1]]
 
-    def __init__(self, h=None, x0=None, **kwargs):
-
-        h_in = h
-        x0_in = x0
-
-        # Sanity Checks
-        assert type(h_in) in [list, tuple], 'h_in must be a list, not {}'.format(type(h_in))
-        assert len(h_in) in [1, 2, 3], (
-            'h_in must be of dimension 1, 2, or 3 not {}'.format(len(h_in))
-        )
-
-        # build h
-        h = list(range(len(h_in)))
-        for i, h_i in enumerate(h_in):
-            if utils.isScalar(h_i) and type(h_i) is not np.ndarray:
-                # This gives you something over the unit cube.
-                h_i = self._unitDimensions[i] * np.ones(int(h_i))/int(h_i)
-            elif type(h_i) is list:
-                h_i = utils.meshTensor(h_i)
-            assert isinstance(h_i, np.ndarray), (
-                "h[{0:d}] is not a numpy array.".format(i)
-            )
-            assert len(h_i.shape) == 1, (
-                "h[{0:d}] must be a 1D numpy array.".format(i)
-            )
-            h[i] = h_i[:]  # make a copy.
-
-        # Origin of the mesh
-        x0 = np.zeros(len(h))
-
-        if x0_in is not None:
-            assert len(h) == len(x0_in), "Dimension mismatch. x0 != len(h)"
-            for i in range(len(h)):
-                x_i, h_i = x0_in[i], h[i]
-                if utils.isScalar(x_i):
-                    x0[i] = x_i
-                elif x_i == '0':
-                    x0[i] = 0.0
-                elif x_i == 'C':
-                    x0[i] = -h_i.sum()*0.5
-                elif x_i == 'N':
-                    x0[i] = -h_i.sum()
-                else:
-                    raise Exception(
-                        "x0[{0:d}] must be a scalar or '0' to be zero, "
-                        "'C' to center, or 'N' to be negative. The input value"
-                        " {1} {2} is invalid".format(i, x_i, type(x_i))
-                    )
-
-        if 'n' in kwargs.keys():
-            n = kwargs.pop('n')
-            assert (n == np.array([x.size for x in h])).all(), (
-                "Dimension mismatch. The provided n doesn't "
-            )
+    def __init__(self, h, x0, **kwargs):
+        """
+        Parameters
+        ----------
+        h : list of numpy.ndarray, list of list of (int, float) tuples, or list of int
+            Describes the cell widths in each dimension. The length of the list is the
+            dimensionality of the mesh. For more information please see `utils.meshTensor`.
+        x0 : array_like of str or float, or str
+            Origin of the mesh. If the elements of the array are strings, '0', 'C', or 'N'
+            are valid, and correspond to [0, 0, 0], [-hi.sum()/2 for hi in h], or
+            [-hi.sum() for hi in h], respectively.
+        reference_system: ['cartesian', 'cylindrical', 'spherical'], optional
+            The type of coordinate reference frame. Can take on the values
+            cartesian, cylindrical, or spherical. Abbreviations of these are allowed.
+        axis_u : array_like, optional
+            length three array of floats for orientation direction of axis 1, defaults to [1, 0, 0]
+        axis_v : array_like, optional
+            length three array of floats for orientation direction of axis 2, defaults to [0, 1, 0]
+        axis_w : array_like, optional
+            length three array of floats for orientation direction of axis 2, defaults to [0, 0, 1]
+        """
+        h = self._easy_validate('h', h)
+        if 'shape' not in kwargs:
+            shape = [len(hi) for hi in h]
         else:
-            n = np.array([x.size for x in h])
+            shape = kwargs.pop('shape')
 
-        super(BaseTensorMesh, self).__init__(
-            n, x0=x0, **kwargs
-        )
+        x0_in = x0
+        x0 = self._easy_validate('x0', x0_in)
+        super().__init__(h=h, shape=shape, x0=x0, **kwargs)
 
-        # Ensure h contains 1D vectors
-        self.h = [utils.mkvc(x.astype(float)) for x in h]
+        # now self.h is set so must call this again to revalidate the string chars
+        self.x0 = self._easy_validate('x0', x0_in)
+
+    @validator('h', pre=True)
+    def _prevalid_h(cls, v):
+        # validate that it is a list before other things
+        if not isinstance(v, (list, tuple)):
+            raise ValueError(f'h must be a list or tuple not {type(v)}')
+        if len(v) > 3:
+            raise ValueError(f'h must be of dimension less than 3, not {len(v)}')
+
+        # First try to convert it to
+        h = []
+        for i, v_i in enumerate(v):
+            try:
+                v_i = np.linspace(0, cls._unitDimensions[i], int(v_i))
+            except TypeError:
+                try:
+                    v_i = utils.meshTensor(v_i)
+                except:
+                    pass
+            h.append(v_i)
+        return h
+
+    @validator('x0', pre=True)
+    def _prevalid_x0(cls, v, values, **kwargs):
+        v_out = []
+        if 'h' in values:
+            h = values['h']
+            if len(v) != len(h):
+                raise ValueError('Dimension mismatch. len(x0) != len(h)')
+        else:
+            h = [np.array[unit] for unit in cls._unitDimension]
+        for i, vi in enumerate(v):
+            if isinstance(vi, str):
+                if vi.lower() == '0':
+                    vi = 0
+                elif vi.lower() == 'c':
+                    vi = -h[i].sum()/2
+                elif vi.lower() == 'n':
+                    vi = -h[i].sum
+                else:
+                    raise ValueError(f"x0 string character {vi} not recognized, must be either '0', 'N', or 'C'.")
+            v_out.append(vi)
+        return v_out
 
     @property
     def hx(self):
