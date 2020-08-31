@@ -112,7 +112,7 @@ class TensorView(object):
             show_it = kwargs["showIt"]
             warnings.warn("showIt has been deprecated, please use show_it", DeprecationWarning)
         if "annotationColor" in kwargs:
-            show_it = kwargs["annotationColor"]
+            annotation_color = kwargs["annotationColor"]
             warnings.warn("annotationColor has been deprecated, please use annotation_color", DeprecationWarning)
         if "vType" in kwargs:
             v_type = kwargs["vType"]
@@ -857,7 +857,12 @@ class CylView(object):
         if len(args) > 0:
             val = args[0]
 
-        v_type = kwargs.get('v_type', None)
+        if "vType" in kwargs:
+            v_type = kwargs.pop("vType")
+            warnings.warn("vType has been deprecated, please use v_type", DeprecationWarning)
+        else:
+            v_type = kwargs.get('v_type', None)
+        print('Cyl', v_type)
         mirror = kwargs.pop('mirror', None)
         mirror_data = kwargs.pop('mirror_data', None)
 
@@ -927,8 +932,13 @@ class CylView(object):
                 raise AssertionError("ax must be an matplotlib.axes.Axes")
             fig = ax.figure
 
+
+        if "showIt" in kwargs:
+            show_it = kwargs.pop("showIt")
+            warnings.warn("showIt has been deprecated, please use show_it", DeprecationWarning)
+        else:
+            show_it = kwargs.get('show_it', False)
         # Don't show things in the TM.plotImage
-        show_it = kwargs.get('show_it', False)
         kwargs['show_it'] = False
 
         out = getattr(M, plotType)(*args, **kwargs)
