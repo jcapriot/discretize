@@ -237,10 +237,19 @@ class CurvilinearMesh(
 
         if getattr(self, '_vol', None) is None:
             if self.dim == 2:
-                A, B, C, D = utils.indexCube('ABCD', self.vnC+1)
-                normal, area = utils.faceInfo(np.c_[self.gridN, np.zeros(
-                                              (self.nN, 1))], A, B, C, D)
-                self._vol = area
+                x_n, y_n = self.nodes
+
+                # zipper polygon area method
+                self._vol = 0.5*(
+                    x_n[:-1,:-1]*y_n[ 1:,:-1] +
+                    x_n[ 1:,:-1]*y_n[ 1:, 1:] +
+                    x_n[ 1:, 1:]*y_n[:-1, 1:] +
+                    x_n[:-1, 1:]*y_n[:-1,:-1] -
+                    x_n[ 1:,:-1]*y_n[:-1,:-1] -
+                    x_n[ 1:, 1:]*y_n[ 1:,:-1] -
+                    x_n[:-1, 1:]*y_n[ 1:, 1:] -
+                    x_n[:-1,:-1]*y_n[:-1, 1:]
+                ).reshape(-1, order="F")
             elif self.dim == 3:
                 # Each polyhedron can be decomposed into 5 tetrahedrons
                 # However, this presents a choice so we may as well divide in
