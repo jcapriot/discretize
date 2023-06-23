@@ -5188,12 +5188,20 @@ cdef class _TreeMesh:
             z = 0
         return self.tree.containing_cell(x, y, z).index
 
-    def _get_containing_cell_indexes(self, locs):
+    def _get_containing_cell_indexes(self, locs, ext_closest=True):
         locs = np.require(np.atleast_2d(locs), dtype=np.float64, requirements='C')
         cdef double[:,:] d_locs = locs
         cdef int_t n_locs = d_locs.shape[0]
         cdef np.int64_t[:] indexes = np.empty(n_locs, dtype=np.int64)
         cdef double x, y, z
+        cdef double x0, xf, y0, yf, z0, zf
+        x0 = self._xs[0]
+        xf = self._xs[-1]
+        y0 = self._ys[0]
+        yf = self._ys[-1]
+        z0 = self._zs[0]
+        zf = self._zs[-1]
+
         for i in range(n_locs):
             x = d_locs[i, 0]
             y = d_locs[i, 1]
@@ -5201,7 +5209,10 @@ cdef class _TreeMesh:
                 z = d_locs[i, 2]
             else:
                 z = 0
-            indexes[i] = self.tree.containing_cell(x, y, z).index
+            if not ext_closest and (x < x0 or x > xf or y < y0 or y > yf or z < z0 or z > zf):
+                indexes[i] = -1
+            else:
+                indexes[i] = self.tree.containing_cell(x, y, z).index
         if n_locs==1:
             return indexes[0]
         return np.array(indexes)

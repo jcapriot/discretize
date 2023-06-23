@@ -3387,7 +3387,7 @@ class BaseMesh:
 
         return ind
 
-    def point2index(self, locs):
+    def point2index(self, locs, ext_closest=True):
         """Find cells that contain the given points.
 
         Returns an array of index values of the cells that contain the given
@@ -3397,6 +3397,10 @@ class BaseMesh:
         ----------
         locs: (N, dim) array_like
             points to search for the location of
+        ext_closest: bool, optional
+            Whether to identify the closest cell on the mesh if the point is
+            exterior to the mesh. Otherwise this will return -1 if a point is
+            outside.
 
         Returns
         -------
