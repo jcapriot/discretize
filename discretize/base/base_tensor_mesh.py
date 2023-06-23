@@ -996,6 +996,38 @@ class BaseTensorMesh(BaseRegularMesh):
         else:
             return None
 
+    def point2index(self, locs, ext_closest=True):  # NOQA D102
+        # Documentation inherited from discretize.base.BaseMesh
+        # Do a numpy search sorted on the nodes_x, nodes_y, and nodes_z
+        # convert the ix, iy, iz into a cell index
+        # if not ext_closest and it is outside return -1
+        locs = np.atleast_2d(locs)
+        if locs.shape[-1] != self.dim:
+            raise ValueError(
+                f"locs array shape[-1] {locs.shape[-1]} incompatible"
+                f" with mesh dimension: {self.dim}."
+            )
+        inds = []
+        if not ext_closest:
+            is_outside = np.full(locs.shape[:-1], False)
+
+        for i_d in range(self.dim):
+            ps = locs[..., i_d]
+            if i_d == 0:
+                ns = self.nodes_x
+            if i_d == 1:
+                ns = self.nodes_y
+            if i_d == 2:
+                ns = self.nodes_z
+            inds.append(np.searchsorted(ns, ps, "left") - 1)
+            if not ext_closest:
+                is_outside |= (ps < ns[0] - 1e-16) | (ps > ns[-1] + 1e-16)
+        inds = np.ravel_multi_index(inds, self.shape_cells, order="F", mode="clip")
+        if not ext_closest:
+            inds[is_outside] = -1
+
+        return inds
+
     # DEPRECATED
     @property
     def hx(self):
