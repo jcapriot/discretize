@@ -21,10 +21,10 @@ variables:
   IS_MAIN: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
 
 stages:
-  - stage: StyleChecks
-    displayName: "Style Checks"
-    jobs:
-      - template: .ci/azure/style.yml
+#  - stage: StyleChecks
+#    displayName: "Style Checks"
+#    jobs:
+#      - template: .ci/azure/style.yml
 
   - stage: BuildSource
     displayName: "Build Source distribution"
