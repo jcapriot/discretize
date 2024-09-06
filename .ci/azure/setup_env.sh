@@ -13,25 +13,11 @@ then
   fi
 fi
 
-echo "  - python="$PYTHON_VERSION >> environment_test_with_pyversion.yml
+echo "python="$PYTHON_VERSION
 
-conda env create --file environment_test_with_pyversion.yml
-rm environment_test_with_pyversion.yml
+# install from a local wheel file
+pip install --use-wheel --no-index --find-links=dist discretize[test]
 
-if ${is_azure}
-then
-  source activate discretize-test
-  pip install pytest-azurepipelines
-else
-  conda activate discretize-test
-fi
-
-# The --vsenv config setting will prefer msvc compilers on windows.
-# but will do nothing on mac and linux.
-pip install --no-build-isolation --editable . --config-settings=setup-args="--vsenv"
-
-echo "Conda Environment:"
-conda list
 
 echo "Installed discretize version:"
 python -c "import discretize; print(discretize.__version__)"

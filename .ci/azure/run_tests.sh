@@ -8,8 +8,6 @@ do_cov=$(echo "${COVERAGE:-false}" | tr '[:upper:]' '[:lower:]')
 
 test_args=""
 
-source activate discretize-test
-
 if ${do_doc}
 then
   if ${is_azure}
