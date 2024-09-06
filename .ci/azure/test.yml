@@ -40,7 +40,7 @@ jobs:
       inputs:
         buildType: 'current'
         artifactName: 'wheels'
-        targetPath: '.'
+        targetPath: 'dist'
 
     - task: UsePythonVersion@0
       inputs:

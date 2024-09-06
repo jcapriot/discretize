@@ -15,8 +15,8 @@ fi
 
 echo "python="$PYTHON_VERSION
 
-# install from a local wheel file
-pip install --use-wheel --no-index --find-links=dist discretize[test]
+# install from a wheel file in the dist folder
+pip install --no-index --find-links=dist discretize[test]
 
 
 echo "Installed discretize version:"
