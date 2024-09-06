@@ -37,7 +37,6 @@ stages:
       - template: .ci/azure/wheels.yml
 
   - stage: Testing
-    dependsOn: StyleChecks
     jobs:
       - template: .ci/azure/test.yml
 
