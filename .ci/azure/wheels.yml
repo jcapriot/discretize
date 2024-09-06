@@ -51,7 +51,14 @@ jobs:
       inputs:
         buildType: 'current'
         artifactName: 'source_dist'
-        targetPath: '.'
+        targetPath: 'dist'
+
+    - bash: |
+        source_dist=$(ls dist/*.tar.gz)
+        echo source_dist
+        tar --strip-components=1 -xvzf $source_dist
+        ls -al
+      displayName: Unpack source distribution.
 
     - bash: |
         set -o errexit
