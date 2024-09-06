@@ -1,7 +1,7 @@
 trigger:
   branches:
     include:
-    - 'main'
+    - '*'
     exclude:
     - '*no-ci*'
   tags:
@@ -26,39 +26,33 @@ stages:
     jobs:
       - template: .ci/azure/style.yml
 
-  - stage: Testing
-    dependsOn: StyleChecks
-    jobs:
-      - template: .ci/azure/test.yml
-
-  - stage: DocBuild
-    dependsOn: StyleChecks
-    jobs:
-      - template: .ci/azure/docs.yml
-
-  - stage: BuildWheels
-    dependsOn:
-      - Testing
-      - DocBuild
-    displayName: "Build Wheels"
-    jobs:
-      - template: .ci/azure/wheels.yml
-
   - stage: BuildSource
-    dependsOn:
-      - Testing
-      - DocBuild
     displayName: "Build Source distribution"
     jobs:
       - template: .ci/azure/sdist.yml
 
-  - stage: Deploy
-    displayName: "Deploy Source, Wheels, and Docs"
-    dependsOn:
-      - BuildWheels
-      - BuildSource
-    condition: and(succeeded(), or(eq(variables.IS_TAG, true), eq(variables.IS_MAIN, true)))
+  - stage: BuildWheels
+    displayName: "Build Wheels"
     jobs:
-      - template: .ci/azure/deploy.yml
+      - template: .ci/azure/wheels.yml
+
+#  - stage: Testing
+#    dependsOn: StyleChecks
+#    jobs:
+#      - template: .ci/azure/test.yml
+#
+#  - stage: DocBuild
+#    dependsOn: StyleChecks
+#    jobs:
+#      - template: .ci/azure/docs.yml
+#
+#  - stage: Deploy
+#    displayName: "Deploy Source, Wheels, and Docs"
+#    dependsOn:
+#      - BuildWheels
+#      - BuildSource
+#    condition: and(succeeded(), or(eq(variables.IS_TAG, true), eq(variables.IS_MAIN, true)))
+#    jobs:
+#      - template: .ci/azure/deploy.yml
 
 

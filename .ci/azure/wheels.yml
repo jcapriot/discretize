@@ -42,11 +42,16 @@ jobs:
   pool:
     vmImage: $(image)
   steps:
+    # No need to checkout the repo here, were going to build from the source distribution!
+    - checkout: none
+
     - task: UsePythonVersion@0
 
-    - bash:
-        git fetch --tags
-      displayName: Fetch tags
+    - task: DownloadPipelineArtifact@2
+      inputs:
+        buildType: 'current'
+        artifactName: 'source_dist'
+        targetPath: '.'
 
     - bash: |
         set -o errexit
