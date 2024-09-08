@@ -49,7 +49,7 @@ c_undefined_ok = ['-Wno-maybe-uninitialized']
 
 cython_c_args = [numpy_nodepr_api, use_math_defines]
 
-if get_option('cy_coverage')
+if get_option('b_coverage')
   # tell cython to enable linetracing
   add_project_arguments(['--directive', 'linetrace=true'], language : 'cython')
   # tell the c_compiler and cpp_compiler to define CYTHON_TRACE_NOGIL
