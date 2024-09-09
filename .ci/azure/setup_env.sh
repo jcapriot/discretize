@@ -15,9 +15,12 @@ fi
 
 echo "python="$PYTHON_VERSION
 
-# install from a wheel file in the dist folder
-pip install discretize[test] --index-url= --find-links=dist --extra-index-url=https://pypi.org/simple
+pip install packaging
+wheel_file=$(python .ci/azure/get_wheel.py dist)
+
+# install from the built wheel file
+pip install $wheel_file[test]
 
 
 echo "Installed discretize version:"
-python -c "import discretize; print(discretize.__version__)"
+python -c "from importlib.metadata import version; print(version('discretize'))"
