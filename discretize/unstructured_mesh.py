@@ -2,7 +2,7 @@
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.spatial import KDTree
+from scipy.spatial import KDTree, ConvexHull
 from discretize.utils import Identity, invert_blocks, spzeros, cross2d
 from discretize.base import BaseMesh
 from discretize._extensions.simplex_helpers import (
@@ -12,6 +12,70 @@ from discretize._extensions.simplex_helpers import (
     _interp_cc,
 )
 from discretize.mixins import InterfaceMixins, SimplexMeshIO
+
+
+def _morton_order(locs, lower, upper):
+    """Order points along a Morton (Z-order) curve over the box [lower, upper].
+
+    Consecutive points in this order are usually close together. Points outside
+    the box are clamped to it.
+
+    Each coordinate is quantized to an integer (21 bits in 3D, 31 bits in 2D,
+    so ``dim`` of them fit in 64 bits), and the Morton key interleaves their
+    bits: bit ``b`` of coordinate ``d`` becomes bit ``b * dim + d`` of the key.
+    Sorting by the key orders the points along the Z-order curve. Written out
+    directly, the key is::
+
+        key = 0
+        for b in range(bits):
+            for d in range(dim):
+                key |= ((q[d] >> b) & 1) << (b * dim + d)
+
+    which is what ``test_morton_order_matches_bit_by_bit`` in
+    ``tests/simplex/test_point_location.py`` checks this against.
+
+    Rather than looping over every bit, each coordinate's bits are spread apart
+    with a few ``x = (x | (x << shift)) & mask`` steps (the "magic bits"
+    method), using the 64-bit shifts and masks from libmorton:
+
+    * 3D: https://github.com/Forceflow/libmorton/blob/1ac6131ad153f64c93a8dcb76dc5bbdc515ba7ee/include/libmorton/morton3D.h#L101-L114
+    * 2D: https://github.com/Forceflow/libmorton/blob/1ac6131ad153f64c93a8dcb76dc5bbdc515ba7ee/include/libmorton/morton2D.h#L95-L109
+
+    (Their first step is left out here: it only clears bits above the 21 or 31
+    bits that the clipping already guarantees.)
+    """
+    dim = locs.shape[1]
+    if dim == 3:
+        bits = 21
+        steps = [
+            (32, 0x1F00000000FFFF),
+            (16, 0x1F0000FF0000FF),
+            (8, 0x100F00F00F00F00F),
+            (4, 0x10C30C30C30C30C3),
+            (2, 0x1249249249249249),
+        ]
+    else:
+        bits = 31
+        steps = [
+            (16, 0x0000FFFF0000FFFF),
+            (8, 0x00FF00FF00FF00FF),
+            (4, 0x0F0F0F0F0F0F0F0F),
+            (2, 0x3333333333333333),
+            (1, 0x5555555555555555),
+        ]
+    # Quantize each coordinate to an integer in [0, 2**bits - 1].
+    n_bins = (1 << bits) - 1
+    width = np.where(upper > lower, upper - lower, 1.0)
+    q = np.clip((locs - lower) / width * n_bins, 0, n_bins).astype(np.uint64)
+    key = np.zeros(len(locs), dtype=np.uint64)
+    for d in range(dim):
+        # Spread the bits of coordinate d out to every dim-th bit...
+        x = q[:, d]
+        for shift, mask in steps:
+            x = (x | (x << np.uint64(shift))) & np.uint64(mask)
+        # ...and interleave it with the others at offset d.
+        key |= x << np.uint64(d)
+    return np.argsort(key, kind="stable")
 
 
 class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
@@ -798,54 +862,311 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
             self._cc_tree = KDTree(self.cell_centers)
         return self._cc_tree
 
-    def point2index(self, locs):  # NOQA D102
-        # Documentation inherited from discretize.base.BaseMesh
-        tree = self.cell_centers_tree
-        # for each location, find the nearest cell center as an initial guess for
-        # the nearest simplex, then use a directed search to further refine
-        _, nearest_cc = tree.query(locs)
-        nodes = self.nodes
-        simplex_nodes = self.simplices
+    @property
+    def _is_convex(self):
+        """Whether the mesh fills its convex hull, with no internal boundaries.
+
+        On such a mesh, a walk that reaches the boundary with the point beyond
+        it proves the point is outside. Otherwise (concave boundaries, interior
+        voids, cracks) that needs checking.
+
+        The mesh lies inside its hull, so equal volumes rule out concavities
+        and voids, and equal boundary areas also rule out cracks, which have no
+        volume but add boundary on both of their sides.
+        """
+        if getattr(self, "_is_convex_mesh", None) is None:
+            facets = self._boundary_facets_nodes
+            hull = ConvexHull(self.nodes[np.unique(facets)])
+            v = self.nodes[facets]
+            if self.dim == 2:
+                boundary_area = np.linalg.norm(v[:, 1] - v[:, 0], axis=-1).sum()
+            else:
+                boundary_area = (
+                    0.5
+                    * np.linalg.norm(
+                        np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0]), axis=-1
+                    ).sum()
+                )
+            self._is_convex_mesh = bool(
+                np.isclose(hull.volume, self.cell_volumes.sum(), rtol=1e-10, atol=0)
+                and np.isclose(hull.area, boundary_area, rtol=1e-10, atol=0)
+            )
+            self._hull_equations = np.ascontiguousarray(hull.equations)
+        return self._is_convex_mesh
+
+    @property
+    def _boundary_hull_equations(self):
+        """Unit outward normals and offsets of the convex hull's faces."""
+        self._is_convex
+        return self._hull_equations
+
+    @property
+    def _boundary_facet_grid(self):
+        """A uniform grid over the boundary faces.
+
+        Lets a segment be tested against only the boundary faces near it.
+
+        Returns
+        -------
+        origin : (dim) numpy.ndarray of float
+            The grid's lower corner.
+        h : float
+            Width of its (square) cells.
+        shape : (dim) numpy.ndarray of int
+            Number of cells along each axis.
+        ptr, facets : numpy.ndarray of int
+            In CSR form, the boundary faces whose bounding box overlaps each
+            cell (in C order).
+        """
+        if getattr(self, "_facet_grid", None) is None:
+            dim = self.dim
+            v = self.nodes[self._boundary_facets_nodes]
+            f_lo = v.min(axis=1)
+            f_hi = v.max(axis=1)
+            origin = f_lo.min(axis=0)
+            extent = f_hi.max(axis=0) - origin
+            n_facets = len(v)
+            # Cells about the size of a typical face, but no more than a few
+            # cells per face.
+            h = max(np.median((f_hi - f_lo).max(axis=1)), 1e-6 * extent.max())
+            while np.prod(np.ceil(extent / h)) > 8 * n_facets:
+                h *= 1.5
+            shape = np.maximum(np.ceil(extent / h).astype(np.int64), 1)
+            # Pad the faces' boxes so round off can't miss a cell they touch.
+            pad = 1e-6 * h
+            i0 = np.clip(((f_lo - pad - origin) / h).astype(np.int64), 0, shape - 1)
+            i1 = np.clip(((f_hi + pad - origin) / h).astype(np.int64), 0, shape - 1)
+            ext = i1 - i0 + 1
+            counts = ext.prod(axis=1)
+            facet = np.repeat(np.arange(n_facets, dtype=np.int64), counts)
+            off = np.arange(counts.sum()) - np.repeat(
+                np.cumsum(counts) - counts, counts
+            )
+            index = np.empty((len(facet), dim), dtype=np.int64)
+            for d in range(dim - 1, -1, -1):
+                e = ext[facet, d]
+                index[:, d] = i0[facet, d] + off % e
+                off //= e
+            cell = np.ravel_multi_index(index.T, shape)
+            order = np.argsort(cell, kind="stable")
+            ptr = np.zeros(np.prod(shape) + 1, dtype=np.int64)
+            ptr[1:] = np.cumsum(np.bincount(cell, minlength=np.prod(shape)))
+            self._facet_grid = (origin, float(h), shape, ptr, facet[order])
+        return self._facet_grid
+
+    @property
+    def _boundary_facets_nodes(self):
+        """Node indices of each boundary face, ordered so its normal points out."""
+        return self._boundary_facets_and_cells[0]
+
+    @property
+    def _boundary_facet_cells(self):
+        """The cell each boundary face belongs to."""
+        return self._boundary_facets_and_cells[1]
+
+    @property
+    def _boundary_facets_and_cells(self):
+        """Outward oriented boundary faces (node indices) and their cells."""
+        if getattr(self, "_boundary_facets", None) is None:
+            cells, opposite = np.nonzero(self.neighbors == -1)
+            simplices = self.simplices[cells]
+            # The face opposite local node j holds the other nodes, in order.
+            keep = np.arange(self.dim + 1)[None, :] != opposite[:, None]
+            facets = simplices[keep].reshape(len(cells), self.dim)
+            apex = self.nodes[simplices[np.arange(len(cells)), opposite]]
+            v = self.nodes[facets]
+            if self.dim == 2:
+                d = v[:, 1] - v[:, 0]
+                normal = np.c_[d[:, 1], -d[:, 0]]
+            else:
+                normal = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+            inward = np.einsum("ij,ij->i", normal, v[:, 0] - apex) < 0
+            facets[inward, -2:] = facets[inward, -2:][:, ::-1]
+            self._boundary_facets = (facets, cells.astype(np.int64))
+        return self._boundary_facets
+
+    def _locate(self, locs, spatial_sort=True):
+        """Find the simplex containing each point.
+
+        Parameters
+        ----------
+        locs : (n, dim) array_like of float
+            Points to locate.
+        spatial_sort : bool, optional
+            Walk the points in Morton (Z-order) curve order, so each walk starts
+            near its point. If False, walk them in the given order, which is
+            as good for points that are already ordered, e.g. along lines.
+
+        Returns
+        -------
+        inds : (n) numpy.ndarray of int
+            The simplex containing each point. For points outside the mesh, a
+            nearby simplex on the boundary, and -1 for points with non-finite
+            coordinates.
+        barys : (n, dim + 1) numpy.ndarray of float
+            Each point's barycentric coordinates in ``inds`` (zero for points
+            with non-finite coordinates).
+        outside : (n) numpy.ndarray of bool
+            Which points are outside the mesh (including those with non-finite
+            coordinates).
+        """
+        locs = np.atleast_2d(np.asarray(locs, dtype=np.float64))
+        if locs.ndim != 2 or locs.shape[1] != self.dim:
+            raise ValueError(
+                f"locations must have shape (n, {self.dim}), got {locs.shape}"
+            )
+        n = len(locs)
+        if n == 0:
+            return (
+                np.empty(0, dtype=np.int64),
+                np.empty((0, self.dim + 1)),
+                np.empty(0, dtype=bool),
+            )
         transform, shift = self.transform_and_shift
-        return _directed_search(
-            np.atleast_2d(locs),
-            np.atleast_1d(nearest_cc),
-            nodes,
-            simplex_nodes,
+
+        # A NaN would compare as inside the first simplex the walk tests.
+        finite = np.flatnonzero(np.isfinite(locs).all(axis=1))
+        inds = np.full(n, -1, dtype=np.int64)
+        out_barys = np.zeros((n, self.dim + 1))
+        outside = np.ones(n, dtype=bool)
+        if len(finite) == 0:
+            return inds, out_barys, outside
+
+        lower = self.nodes.min(axis=0)
+        upper = self.nodes.max(axis=0)
+        if spatial_sort and len(finite) > 1:
+            order = finite[_morton_order(locs[finite], lower, upper)]
+        else:
+            order = finite
+        # On a convex mesh with no internal boundaries, a walk stopping at the
+        # boundary proves the point is outside. Otherwise it could have stopped
+        # at a concavity, a void or a crack short of a point inside the mesh,
+        # and the walk continues across the gap along a ray to the point.
+        # A point outside the bounding box or convex hull is outside without
+        # that, and a grid over the boundary faces keeps the ray test local.
+        verify = not self._is_convex
+        facets = self.nodes[self._boundary_facets_nodes]
+        facet_cells = self._boundary_facet_cells
+        if verify:
+            hull_equations = self._boundary_hull_equations
+            grid = self._boundary_facet_grid
+        else:
+            hull_equations = np.empty((0, self.dim + 1))
+            grid = (
+                np.zeros(self.dim),
+                1.0,
+                np.ones(self.dim, dtype=np.int64),
+                np.zeros(2, dtype=np.int64),
+                np.empty(0, dtype=np.int64),
+            )
+        # Same step limit as scipy's walk, so a walk that gives up costs less
+        # than the exhaustive search it falls back to:
+        # https://github.com/scipy/scipy/blob/2dd345a7824adb2af902d939a7ba9385c4de4351/scipy/spatial/_qhull.pyx#L1423-L1428
+        max_steps = 1 + self.n_cells // 4
+        status, last, barys, _, _ = _directed_search(
+            np.ascontiguousarray(locs[order]),
+            0,
             self.neighbors,
             transform,
             shift,
-            return_bary=False,
+            max_steps,
+            self.cell_centers,
+            facets,
+            facet_cells,
+            verify,
+            lower,
+            upper,
+            hull_equations,
+            *grid,
         )
+        inds[order] = last
+        out_barys[order] = barys
+        outside[order] = status == -1
+        return inds, out_barys, outside
 
-    def get_interpolation_matrix(  # NOQA D102
-        self, loc, location_type="cell_centers", zeros_outside=False, **kwargs
+    def point2index(self, locs, spatial_sort=True):
+        """Find cells that contain the given points.
+
+        Parameters
+        ----------
+        locs : (n, dim) array_like of float
+            Points to locate.
+        spatial_sort : bool, optional
+            The search walks from simplex to simplex, starting each point's walk
+            where the previous point's ended. By default the points are first
+            sorted along a Morton (Z-order) curve so consecutive points are
+            close. Set to False to walk them in the given order instead, which
+            is as fast for points that are already ordered (e.g. along lines).
+
+        Returns
+        -------
+        (n) numpy.ndarray of int
+            Index of the cell containing each point. For points outside the
+            mesh, the index of a nearby cell on its boundary, and -1 for points
+            with non-finite coordinates.
+        """
+        return self._locate(locs, spatial_sort=spatial_sort)[0]
+
+    def get_interpolation_matrix(
+        self,
+        loc,
+        location_type="cell_centers",
+        zeros_outside=False,
+        spatial_sort=True,
+        **kwargs,
     ):
-        # Documentation inherited from discretize.base.BaseMesh
+        """Construct a linear interpolation matrix from mesh.
+
+        This method constructs a linear interpolation matrix from tensor locations
+        (nodes, cell-centers, faces, etc...) on the mesh to a set of arbitrary
+        locations.
+
+        Parameters
+        ----------
+        loc : (n_pts, dim) numpy.ndarray
+            Location of points to interpolate to. Must have same dimensions as
+            the mesh.
+        location_type : str, optional
+            Tensor locations on the mesh being interpolated from. *location_type*
+            must be one of:
+
+            - 'Ex', 'edges_x'           -> x-component of field defined on x edges
+            - 'Ey', 'edges_y'           -> y-component of field defined on y edges
+            - 'Ez', 'edges_z'           -> z-component of field defined on z edges
+            - 'Fx', 'faces_x'           -> x-component of field defined on x faces
+            - 'Fy', 'faces_y'           -> y-component of field defined on y faces
+            - 'Fz', 'faces_z'           -> z-component of field defined on z faces
+            - 'N', 'nodes'              -> scalar field defined on nodes
+            - 'CC', 'cell_centers'      -> scalar field defined on cell centers
+        zeros_outside : bool, optional
+            If *False*, values at locations outside the mesh are extrapolated
+            from a nearby cell on its boundary. If *True*, values at locations
+            outside the mesh will be zero. Values at locations with non-finite
+            coordinates are always zero.
+        spatial_sort : bool, optional
+            Locating the points walks from cell to cell, starting each point's
+            walk where the previous point's ended. By default the points are
+            first sorted along a Morton (Z-order) curve so consecutive points are
+            close. Set to False to walk them in the given order instead, which is
+            as fast for points that are already ordered (e.g. along lines).
+
+        Returns
+        -------
+        (n_pts, n_loc_type) scipy.sparse.csr_matrix
+            A sparse matrix which interpolates the specified tensor quantity on
+            mesh to the set of specified locations.
+        """
         location_type = self._parse_location_type(location_type)
-        tree = self.cell_centers_tree
-        # for each location, find the nearest cell center as an initial guess for
-        # the nearest simplex, then use a directed search to further refine
         loc = np.atleast_2d(loc)
-        _, nearest_cc = tree.query(loc)
-        nodes = self.nodes
         simplex_nodes = self.simplices
         transform, shift = self.transform_and_shift
 
-        inds, barys = _directed_search(
-            loc,
-            nearest_cc,
-            nodes,
-            simplex_nodes,
-            self.neighbors,
-            transform,
-            shift,
-            zeros_outside=zeros_outside,
-            return_bary=True,
-        )
+        inds, barys, outside = self._locate(loc, spatial_sort=spatial_sort)
+        # Points with non-finite coordinates have zero weights and index -1.
+        not_found = inds == -1
 
         if zeros_outside:
-            barys[inds == -1] = 0.0
+            barys[outside] = 0.0
 
         n_loc = len(loc)
         location_type = self._parse_location_type(location_type)
@@ -862,10 +1183,16 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
             # which will also be the cells used to interpolate from.
             mat = self.average_node_to_cell.T[which_node].tocsr()
             # this will overwrite the "mat" matrices data to create the interpolation
+            if np.any(not_found):
+                # stand in a finite location, the row is zeroed below
+                loc = loc.astype(np.float64, copy=True)
+                loc[not_found] = self.nodes[which_node[not_found]]
             _interp_cc(loc, self.cell_centers, mat.data, mat.indices, mat.indptr)
-            if zeros_outside:
+            if zeros_outside or np.any(not_found):
                 e = np.ones(n_loc)
-                e[inds == -1] = 0.0
+                if zeros_outside:
+                    e[outside] = 0.0
+                e[not_found] = 0.0
                 mat = sp.diags(e, format="csr") @ mat
             return mat
         else:

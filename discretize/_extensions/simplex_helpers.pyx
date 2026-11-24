@@ -24,12 +24,6 @@ ctypedef fused ints:
     np.int32_t
     np.int64_t
 
-ctypedef fused pointers:
-    size_t
-    np.intp_t
-    np.int32_t
-    np.int64_t
-
 @cython.boundscheck(False)
 def _build_faces_edges(ints[:, :] simplices):
     # the node index in each simplex must be in increasing order
@@ -198,96 +192,547 @@ def _build_adjacency(ints[:, :] simplex_faces, n_faces):
                 neighbors[i_other, k] = i_cell
     return neighbors
 
-@cython.boundscheck(False)
-@cython.linetrace(False)
-cdef void _compute_bary_coords(
-    np.float64_t[:] point,
-    np.float64_t[:, :] Tinv,
-    np.float64_t[:] shift,
-    np.float64_t * bary
-) nogil:
-    cdef:
-        int dim = point.shape[0]
-        int i, j
+cdef inline np.uint64_t _xorshift64(np.uint64_t *state) noexcept nogil:
+    cdef np.uint64_t x = state[0]
+    x ^= x << 13
+    x ^= x >> 7
+    x ^= x << 17
+    state[0] = x
+    return x
 
-    bary[dim] = 1.0
-    for i in range(dim):
-        bary[i] = 0.0
-        for j in range(dim):
-            bary[i] += Tinv[i, j] * (point[j] - shift[j])
-        bary[dim] -= bary[i]
 
 @cython.boundscheck(False)
-def _directed_search(
+@cython.wraparound(False)
+cdef inline bint _barycentric(
     np.float64_t[:, :] locs,
-    pointers[:] nearest_cc,
-    np.float64_t[:, :] nodes,
-    ints[:, :] simplex_nodes,
+    Py_ssize_t i,
+    np.float64_t[:, :, :] transform,
+    np.float64_t[:, :] shift,
+    np.int64_t c,
+    np.float64_t eps,
+    np.float64_t *barys,
+) noexcept nogil:
+    """Point i's barycentric coordinates in simplex c; whether it is inside.
+
+    Stops early, with ``barys`` incomplete, as soon as a coordinate shows the
+    point is outside.
+    """
+    cdef:
+        int a, b, dim = locs.shape[1]
+        np.float64_t v, bsum = 0.0
+    for a in range(dim):
+        v = 0.0
+        for b in range(dim):
+            v = v + transform[c, a, b] * (locs[i, b] - shift[c, b])
+        if v < -eps:
+            return False
+        barys[a] = v
+        bsum = bsum + v
+    barys[dim] = 1.0 - bsum
+    return barys[dim] >= -eps
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef np.int64_t _search_all(
+    np.float64_t[:, :] locs,
+    Py_ssize_t i,
+    np.float64_t[:, :, :] transform,
+    np.float64_t[:, :] shift,
+    np.float64_t eps,
+    np.float64_t *barys,
+) noexcept nogil:
+    """A simplex containing point i found by testing every simplex, or -1."""
+    cdef np.int64_t c
+    for c in range(transform.shape[0]):
+        if _barycentric(locs, i, transform, shift, c, eps, barys):
+            return c
+    return -1
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef np.int64_t _walk(
+    np.float64_t[:, :] locs,
+    Py_ssize_t i,
+    np.int64_t *i_simp,
     np.int64_t[:, :] neighbors,
     np.float64_t[:, :, :] transform,
     np.float64_t[:, :] shift,
-    np.float64_t eps=1E-15,
-    bint zeros_outside=False,
-    bint return_bary=True
-):
+    np.int64_t max_steps,
+    np.float64_t eps,
+    np.uint64_t *rng,
+    np.float64_t *barys,
+) noexcept nogil:
+    """Walk from simplex ``i_simp[0]`` towards point i.
+
+    At each step the walk crosses a randomly chosen face that the point lies
+    beyond, without stepping straight back to the simplex it came from. Unlike
+    always crossing the first such face, this terminates on any valid
+    triangulation, not only Delaunay ones (Devillers, Pion and Teillaud, 2002).
+
+    Returns the simplex containing the point, -1 if the walk stopped at the
+    boundary (every face the point is beyond is a boundary face), or -2 if it
+    took more than ``max_steps`` steps. ``i_simp[0]`` is left at the simplex
+    the walk ended in, and ``barys`` holds the point's coordinates in it.
+    """
     cdef:
-        int i, j
-        pointers i_simp
+        int a, j, k, k0, dim = locs.shape[1]
+        np.int64_t c = i_simp[0], prev = -1, nb, choice, steps = 0
+        bint hit_boundary, inside
+        np.float64_t v, bsum
+    while True:
+        bsum = 0.0
+        for a in range(dim):
+            v = 0.0
+            for k in range(dim):
+                v = v + transform[c, a, k] * (locs[i, k] - shift[c, k])
+            barys[a] = v
+            bsum = bsum + v
+        barys[dim] = 1.0 - bsum
+
+        inside = True
+        hit_boundary = False
+        choice = -1
+        k0 = <int>(_xorshift64(rng) % <np.uint64_t>(dim + 1))
+        for k in range(dim + 1):
+            j = (k0 + k) % (dim + 1)
+            if barys[j] < -eps:
+                inside = False
+                nb = neighbors[c, j]
+                if nb == -1:
+                    hit_boundary = True
+                elif nb != prev:
+                    choice = nb
+                    break
+        i_simp[0] = c
+        if inside:
+            return c
+        if choice == -1:
+            if hit_boundary:
+                return -1
+            # The only face the point is beyond leads back to the previous
+            # simplex, so it is on their shared face to within round off.
+            return c
+        if steps >= max_steps:
+            return -2
+        prev = c
+        c = choice
+        steps += 1
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef inline void _barycentric_all(
+    np.float64_t[:, :] locs,
+    Py_ssize_t i,
+    np.float64_t[:, :, :] transform,
+    np.float64_t[:, :] shift,
+    np.int64_t c,
+    np.float64_t *barys,
+) noexcept nogil:
+    """Point i's barycentric coordinates in simplex c."""
+    cdef:
+        int a, b, dim = locs.shape[1]
+        np.float64_t v, bsum = 0.0
+    for a in range(dim):
+        v = 0.0
+        for b in range(dim):
+            v = v + transform[c, a, b] * (locs[i, b] - shift[c, b])
+        barys[a] = v
+        bsum = bsum + v
+    barys[dim] = 1.0 - bsum
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef inline bint _enters(
+    np.float64_t *o,
+    np.float64_t *d,
+    np.float64_t[:, :, :] facets,
+    Py_ssize_t f,
+    int dim,
+    np.float64_t tol,
+    np.float64_t *t_out,
+) noexcept nogil:
+    """Whether the segment ``o + t * d`` (0 < t <= 1) enters the mesh through
+    boundary facet f, and where (``t_out``).
+
+    ``facets`` (n_facets, dim, dim) are the boundary faces (segments in 2D,
+    triangles in 3D), each oriented with its normal pointing out of the mesh,
+    so the segment enters through a facet when it crosses it against its
+    normal. Crossings within ``tol`` of a facet's edges count, so a segment
+    through an edge shared by two facets enters through one of them.
+    """
+    cdef np.float64_t t, s, u, w, det, inv
+    cdef np.float64_t ex, ey, ez, gx, gy, gz, hx, hy, hz, ox, oy, oz, qx, qy, qz
+    if dim == 2:
+        # Solve o + t * d = a + s * (b - a).
+        ex = facets[f, 1, 0] - facets[f, 0, 0]
+        ey = facets[f, 1, 1] - facets[f, 0, 1]
+        det = d[0] * ey - d[1] * ex
+        # The outward normal is (ey, -ex), so entering means
+        # d . (ey, -ex) = det < 0.
+        if det >= 0.0:
+            return False
+        ox = facets[f, 0, 0] - o[0]
+        oy = facets[f, 0, 1] - o[1]
+        t = (ox * ey - oy * ex) / det
+        s = (ox * d[1] - oy * d[0]) / det
+        if s < -tol or s > 1.0 + tol:
+            return False
+    else:
+        # Moller-Trumbore ray-triangle intersection.
+        ex = facets[f, 1, 0] - facets[f, 0, 0]
+        ey = facets[f, 1, 1] - facets[f, 0, 1]
+        ez = facets[f, 1, 2] - facets[f, 0, 2]
+        gx = facets[f, 2, 0] - facets[f, 0, 0]
+        gy = facets[f, 2, 1] - facets[f, 0, 1]
+        gz = facets[f, 2, 2] - facets[f, 0, 2]
+        hx = d[1] * gz - d[2] * gy
+        hy = d[2] * gx - d[0] * gz
+        hz = d[0] * gy - d[1] * gx
+        # det = -d . (e x g), and e x g is the outward normal, so the
+        # segment enters through the facet when det > 0.
+        det = ex * hx + ey * hy + ez * hz
+        if det <= 0.0:
+            return False
+        inv = 1.0 / det
+        ox = o[0] - facets[f, 0, 0]
+        oy = o[1] - facets[f, 0, 1]
+        oz = o[2] - facets[f, 0, 2]
+        u = (ox * hx + oy * hy + oz * hz) * inv
+        if u < -tol or u > 1.0 + tol:
+            return False
+        qx = oy * ez - oz * ey
+        qy = oz * ex - ox * ez
+        qz = ox * ey - oy * ex
+        w = (d[0] * qx + d[1] * qy + d[2] * qz) * inv
+        if w < -tol or u + w > 1.0 + tol:
+            return False
+        t = (gx * qx + gy * qy + gz * qz) * inv
+    t_out[0] = t
+    return t > 0.0 and t <= 1.0 + tol
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef np.int64_t _reentry_facet(
+    np.float64_t[:, :] locs,
+    Py_ssize_t i,
+    np.float64_t[:] origin,
+    np.float64_t[:, :, :] facets,
+    np.float64_t[:] grid_origin,
+    np.float64_t grid_h,
+    np.int64_t[:] grid_shape,
+    np.int64_t[:] grid_ptr,
+    np.int64_t[:] grid_facets,
+    np.float64_t tol,
+    np.int64_t *used,
+    int n_used,
+) noexcept nogil:
+    """The first boundary facet through which the segment from ``origin`` to
+    point i enters the mesh, skipping the ``n_used`` facets in ``used``.
+
+    Only the facets listed in the grid cells the segment passes through are
+    tested (``grid_ptr`` and ``grid_facets`` hold, in CSR form, the facets
+    whose bounding box overlaps each cell of a uniform grid), visiting the
+    cells in order along the segment (Amanatides and Woo, 1987). A facet hit
+    no further along than the end of the current grid cell is the first one,
+    since every facet the segment crosses before there is listed in a cell
+    already visited.
+
+    Returns -1 if the segment does not enter the mesh, and -2 if it only
+    enters through facets in ``used``.
+    """
+    cdef:
+        int a, k, dim = locs.shape[1], axis
+        Py_ssize_t j, f, cell, n_steps = 0, max_grid_steps = 0
+        bint is_used, saw_used = False
+        np.int64_t best = -1
+        np.int64_t ix[3]
+        np.int64_t step[3]
+        np.float64_t o[3]
+        np.float64_t d[3]
+        np.float64_t t_max[3]
+        np.float64_t t_delta[3]
+        np.float64_t best_t = 2.0, t, t_end
+    for a in range(dim):
+        o[a] = origin[a]
+        d[a] = locs[i, a] - origin[a]
+        ix[a] = <np.int64_t>((o[a] - grid_origin[a]) / grid_h)
+        if ix[a] < 0:
+            ix[a] = 0
+        if ix[a] >= grid_shape[a]:
+            ix[a] = grid_shape[a] - 1
+        if d[a] > 0.0:
+            step[a] = 1
+            t_max[a] = (grid_origin[a] + (ix[a] + 1) * grid_h - o[a]) / d[a]
+            t_delta[a] = grid_h / d[a]
+        elif d[a] < 0.0:
+            step[a] = -1
+            t_max[a] = (grid_origin[a] + ix[a] * grid_h - o[a]) / d[a]
+            t_delta[a] = -grid_h / d[a]
+        else:
+            step[a] = 0
+            t_max[a] = 2.0
+            t_delta[a] = 2.0
+        max_grid_steps += grid_shape[a]
+
+    while True:
+        cell = ix[0]
+        for a in range(1, dim):
+            cell = cell * grid_shape[a] + ix[a]
+        for j in range(grid_ptr[cell], grid_ptr[cell + 1]):
+            f = grid_facets[j]
+            if not _enters(o, d, facets, f, dim, tol, &t) or t >= best_t:
+                continue
+            is_used = False
+            for k in range(n_used):
+                if used[k] == f:
+                    is_used = True
+                    break
+            if is_used:
+                saw_used = True
+            else:
+                best_t = t
+                best = f
+        axis = 0
+        for a in range(1, dim):
+            if t_max[a] < t_max[axis]:
+                axis = a
+        t_end = t_max[axis]
+        if best != -1 and best_t <= t_end:
+            return best
+        if t_end >= 1.0:
+            break
+        ix[axis] += step[axis]
+        if ix[axis] < 0 or ix[axis] >= grid_shape[axis]:
+            break
+        t_max[axis] += t_delta[axis]
+        # Each step moves to a new cell along the segment, so this only
+        # guards against round off.
+        n_steps += 1
+        if n_steps > max_grid_steps:
+            break
+    if best == -1 and saw_used:
+        return -2
+    return best
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef np.int64_t _last_exit_facet(
+    np.float64_t[:, :] locs,
+    Py_ssize_t i,
+    np.float64_t[:] origin,
+    np.float64_t[:, :, :] facets,
+    np.float64_t tol,
+) noexcept nogil:
+    """The last boundary facet through which the segment from ``origin`` to
+    point i leaves the mesh, or -1 if it does not leave it.
+
+    Tests every facet, so only for the rare point whose walk gave up. Going
+    backwards from the point, it is the first facet the segment enters through.
+    """
+    cdef:
+        int a, dim = locs.shape[1]
+        Py_ssize_t f
+        np.int64_t best = -1
+        np.float64_t o[3]
+        np.float64_t d[3]
+        np.float64_t best_t = 2.0, t
+    for a in range(dim):
+        o[a] = locs[i, a]
+        d[a] = origin[a] - locs[i, a]
+    for f in range(facets.shape[0]):
+        if _enters(o, d, facets, f, dim, tol, &t) and t < best_t:
+            best_t = t
+            best = f
+    return best
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef bint _outside_hull(
+    np.float64_t[:, :] locs,
+    Py_ssize_t i,
+    np.float64_t[:] lower,
+    np.float64_t[:] upper,
+    np.float64_t[:, :] hull_equations,
+    np.float64_t tol,
+) noexcept nogil:
+    """Whether point i is clearly outside the mesh's bounding box or convex
+    hull (``hull_equations`` are scipy's ConvexHull.equations, with unit
+    outward normals)."""
+    cdef:
+        int a, dim = locs.shape[1]
+        Py_ssize_t h
+        np.float64_t v
+    for a in range(dim):
+        if locs[i, a] < lower[a] - tol or locs[i, a] > upper[a] + tol:
+            return True
+    for h in range(hull_equations.shape[0]):
+        v = hull_equations[h, dim]
+        for a in range(dim):
+            v = v + hull_equations[h, a] * locs[i, a]
+        if v > tol:
+            return True
+    return False
+
+
+# A point whose walk needs more than this many jumps across gaps in the mesh
+# is found by testing every simplex instead.
+cdef enum:
+    _MAX_JUMPS = 64
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def _directed_search(
+    np.float64_t[:, :] locs,
+    np.int64_t start,
+    np.int64_t[:, :] neighbors,
+    np.float64_t[:, :, :] transform,
+    np.float64_t[:, :] shift,
+    np.int64_t max_steps,
+    np.float64_t[:, :] cell_centers,
+    np.float64_t[:, :, :] facets,
+    np.int64_t[:] facet_cells,
+    bint verify_outside,
+    np.float64_t[:] lower,
+    np.float64_t[:] upper,
+    np.float64_t[:, :] hull_equations,
+    np.float64_t[:] grid_origin,
+    np.float64_t grid_h,
+    np.int64_t[:] grid_shape,
+    np.int64_t[:] grid_ptr,
+    np.int64_t[:] grid_facets,
+    np.float64_t eps=1E-15,
+):
+    """Locate points by walking from simplex to simplex.
+
+    The points are walked in the given order, each one starting from the simplex
+    the previous point was found in (the first starts at ``start``). A walk that
+    takes more than ``max_steps`` steps falls back to testing every simplex.
+
+    A walk that stops at the boundary proves the point is outside only on a
+    convex mesh. Otherwise (``verify_outside``) a point outside the mesh's
+    bounding box (``lower``, ``upper``) or convex hull (``hull_equations``) is
+    still outside. If not, the segment from the center of the simplex the walk
+    stopped in to the point is tested against the boundary ``facets`` (through
+    a uniform grid over them, see ``_reentry_facet``): it leaves the mesh
+    through the face the walk stopped at, and if it enters again, the walk
+    continues from the simplex (``facet_cells``) behind the first facet it
+    enters through. If it never enters again, the point is outside. A point
+    never jumps through the same facet twice, so a walk that would circle back
+    falls back to testing every simplex. Either way, the next point's walk
+    starts from the simplex actually found.
+
+    A point outside the mesh is given the boundary simplex its walk stopped
+    in. If its walk gave up instead, it is given the simplex behind the last
+    boundary facet the segment from the center of the simplex the walk gave up
+    in to the point leaves the mesh through.
+
+    Returns
+    -------
+    status : (n_locs) numpy.ndarray of int
+        The simplex containing each point, or -1 if it is outside the mesh.
+    last : (n_locs) numpy.ndarray of int
+        The simplex containing each point, or for points outside the mesh a
+        boundary simplex near it.
+    barys : (n_locs, dim + 1) numpy.ndarray of float
+        Each point's barycentric coordinates in ``last``.
+    n_jumps : int
+        How many times a walk had to continue across a gap in the mesh.
+    n_searched : int
+        How many points needed testing every simplex.
+    """
+    cdef:
+        Py_ssize_t i
+        int a, jumps
         int n_locs = locs.shape[0], dim = locs.shape[1]
-        int max_directed = 1 + simplex_nodes.shape[0] // 4
-        int i_directed
-        bint is_inside
-        np.int64_t[:] inds = np.full(len(locs), -1, dtype=np.int64)
-        np.float64_t[:, :] all_barys = np.empty((1, 1), dtype=np.float64)
+        np.int64_t i_simp = start, state, f
+        Py_ssize_t n_jumps = 0, n_searched = 0
+        np.uint64_t rng = 0x9E3779B97F4A7C15
         np.float64_t barys[4]
-        np.float64_t[:] loc
-        np.float64_t[:, :] Tinv
-        np.float64_t[:] rD
-    if return_bary:
-        all_barys = np.empty((len(locs), dim+1), dtype=np.float64)
+        np.float64_t found_barys[4]
+        np.int64_t used[_MAX_JUMPS]
+        np.float64_t hull_tol = 0.0
+        np.int64_t[:] status = np.empty(n_locs, dtype=np.int64)
+        np.int64_t[:] last = np.empty(n_locs, dtype=np.int64)
+        np.float64_t[:, :] all_barys = np.empty((n_locs, dim + 1), dtype=np.float64)
 
-    for i in range(n_locs):
-        loc = locs[i]
+    if verify_outside:
+        for a in range(dim):
+            hull_tol = max(hull_tol, upper[a] - lower[a])
+        hull_tol = 1E-10 * hull_tol
 
-        i_simp = nearest_cc[i]  # start at the nearest cell center
-        i_directed = 0
-        while i_directed < max_directed:
-            Tinv = transform[i_simp]
-            rD = shift[i_simp]
-            _compute_bary_coords(loc, Tinv, rD, barys)
-            j = 0
-            is_inside = True
-            while j <= dim:
-                if barys[j] < -eps:
-                    is_inside = False
-                    # if not -1, move towards neighbor
-                    if neighbors[i_simp, j] != -1:
-                        i_simp = neighbors[i_simp, j]
+    with nogil:
+        for i in range(n_locs):
+            state = _walk(
+                locs, i, &i_simp, neighbors, transform, shift, max_steps, eps,
+                &rng, barys
+            )
+            if (
+                state == -1 and verify_outside
+                and _outside_hull(locs, i, lower, upper, hull_equations, hull_tol)
+            ):
+                # Nothing to cross over to.
+                pass
+            else:
+                jumps = 0
+                while state == -1 and verify_outside:
+                    if jumps == _MAX_JUMPS:
+                        state = -2
                         break
-                j += 1
-            # If inside, I found my container
-            if is_inside:
-                break
-            # Else, if I cycled through every bary
-            # without breaking out of the above loop, that means I'm completely outside
-            elif j == dim + 1:
-                if zeros_outside:
-                    i_simp = -1
-                break
-            i_directed += 1
+                    f = _reentry_facet(
+                        locs, i, cell_centers[i_simp], facets, grid_origin, grid_h,
+                        grid_shape, grid_ptr, grid_facets, 1E-12, used, jumps
+                    )
+                    if f == -1:
+                        break
+                    if f == -2:
+                        # Every way back in is a facet this point already
+                        # jumped through, so the walk would go in circles.
+                        state = -2
+                        break
+                    used[jumps] = f
+                    jumps += 1
+                    n_jumps += 1
+                    i_simp = facet_cells[f]
+                    state = _walk(
+                        locs, i, &i_simp, neighbors, transform, shift, max_steps,
+                        eps, &rng, barys
+                    )
 
-        if i_directed == max_directed:
-            # made it through the whole loop without breaking out
-            # Mark as failed
-            i_simp = -2
-        inds[i] = i_simp
-        if return_bary:
-            for j in range(dim+1):
-                all_barys[i, j] = barys[j]
+            if state == -2:
+                n_searched += 1
+                state = _search_all(locs, i, transform, shift, eps, found_barys)
+                if state >= 0:
+                    i_simp = state
+                    for a in range(dim + 1):
+                        barys[a] = found_barys[a]
+                else:
+                    # The walk gave up somewhere inside the mesh, so find a
+                    # boundary simplex near the point to extrapolate from.
+                    f = _last_exit_facet(
+                        locs, i, cell_centers[i_simp], facets, 1E-12
+                    )
+                    if f >= 0:
+                        i_simp = facet_cells[f]
+                    _barycentric_all(locs, i, transform, shift, i_simp, barys)
+            status[i] = state
+            last[i] = i_simp
+            for a in range(dim + 1):
+                all_barys[i, a] = barys[a]
 
-    if return_bary:
-        return np.array(inds), np.array(all_barys)
-    return np.array(inds)
+    return (
+        np.asarray(status), np.asarray(last), np.asarray(all_barys), n_jumps, n_searched
+    )
+
 
 @cython.boundscheck(False)
 @cython.cdivision(True)
