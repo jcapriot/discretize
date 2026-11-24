@@ -8,7 +8,7 @@ from libcpp.unordered_map cimport unordered_map
 from cython.operator cimport dereference
 cimport cython
 cimport numpy as np
-from libc.math cimport sqrt
+from libc.math cimport sqrt, floor, INFINITY
 
 cdef extern from "triplet.h":
     cdef cppclass triplet[T, U, V]:
@@ -192,12 +192,10 @@ def _build_adjacency(ints[:, :] simplex_faces, n_faces):
                 neighbors[i_other, k] = i_cell
     return neighbors
 
-cdef inline np.uint64_t _xorshift64(np.uint64_t *state) noexcept nogil:
-    cdef np.uint64_t x = state[0]
+cdef inline np.uint64_t _xorshift64(np.uint64_t x) noexcept nogil:
     x ^= x << 13
     x ^= x >> 7
     x ^= x << 17
-    state[0] = x
     return x
 
 
@@ -211,25 +209,29 @@ cdef inline bint _barycentric(
     np.int64_t c,
     np.float64_t eps,
     np.float64_t *barys,
+    bint stop_early=False,
 ) noexcept nogil:
     """Point i's barycentric coordinates in simplex c; whether it is inside.
 
-    Stops early, with ``barys`` incomplete, as soon as a coordinate shows the
-    point is outside.
+    With ``stop_early``, returns as soon as a coordinate shows the point is
+    outside, leaving ``barys`` incomplete.
     """
     cdef:
         int a, b, dim = locs.shape[1]
+        bint inside = True
         np.float64_t v, bsum = 0.0
     for a in range(dim):
         v = 0.0
         for b in range(dim):
             v = v + transform[c, a, b] * (locs[i, b] - shift[c, b])
         if v < -eps:
-            return False
+            if stop_early:
+                return False
+            inside = False
         barys[a] = v
         bsum = bsum + v
     barys[dim] = 1.0 - bsum
-    return barys[dim] >= -eps
+    return inside and barys[dim] >= -eps
 
 
 @cython.boundscheck(False)
@@ -245,7 +247,7 @@ cdef np.int64_t _search_all(
     """A simplex containing point i found by testing every simplex, or -1."""
     cdef np.int64_t c
     for c in range(transform.shape[0]):
-        if _barycentric(locs, i, transform, shift, c, eps, barys):
+        if _barycentric(locs, i, transform, shift, c, eps, barys, True):
             return c
     return -1
 
@@ -277,37 +279,27 @@ cdef np.int64_t _walk(
     the walk ended in, and ``barys`` holds the point's coordinates in it.
     """
     cdef:
-        int a, j, k, k0, dim = locs.shape[1]
+        int j, k, k0, dim = locs.shape[1]
         np.int64_t c = i_simp[0], prev = -1, nb, choice, steps = 0
-        bint hit_boundary, inside
-        np.float64_t v, bsum
+        bint hit_boundary
     while True:
-        bsum = 0.0
-        for a in range(dim):
-            v = 0.0
-            for k in range(dim):
-                v = v + transform[c, a, k] * (locs[i, k] - shift[c, k])
-            barys[a] = v
-            bsum = bsum + v
-        barys[dim] = 1.0 - bsum
+        i_simp[0] = c
+        if _barycentric(locs, i, transform, shift, c, eps, barys):
+            return c
 
-        inside = True
         hit_boundary = False
         choice = -1
-        k0 = <int>(_xorshift64(rng) % <np.uint64_t>(dim + 1))
+        rng[0] = _xorshift64(rng[0])
+        k0 = <int>(rng[0] % <np.uint64_t>(dim + 1))
         for k in range(dim + 1):
             j = (k0 + k) % (dim + 1)
             if barys[j] < -eps:
-                inside = False
                 nb = neighbors[c, j]
                 if nb == -1:
                     hit_boundary = True
                 elif nb != prev:
                     choice = nb
                     break
-        i_simp[0] = c
-        if inside:
-            return c
         if choice == -1:
             if hit_boundary:
                 return -1
@@ -319,29 +311,6 @@ cdef np.int64_t _walk(
         prev = c
         c = choice
         steps += 1
-
-
-@cython.boundscheck(False)
-@cython.wraparound(False)
-cdef inline void _barycentric_all(
-    np.float64_t[:, :] locs,
-    Py_ssize_t i,
-    np.float64_t[:, :, :] transform,
-    np.float64_t[:, :] shift,
-    np.int64_t c,
-    np.float64_t *barys,
-) noexcept nogil:
-    """Point i's barycentric coordinates in simplex c."""
-    cdef:
-        int a, b, dim = locs.shape[1]
-        np.float64_t v, bsum = 0.0
-    for a in range(dim):
-        v = 0.0
-        for b in range(dim):
-            v = v + transform[c, a, b] * (locs[i, b] - shift[c, b])
-        barys[a] = v
-        bsum = bsum + v
-    barys[dim] = 1.0 - bsum
 
 
 @cython.boundscheck(False)
@@ -524,33 +493,216 @@ cdef np.int64_t _reentry_facet(
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
-cdef np.int64_t _last_exit_facet(
+@cython.cdivision(True)
+cdef inline np.float64_t _facet_distance2(
+    np.float64_t *p,
+    np.float64_t[:, :, :] facets,
+    Py_ssize_t f,
+    int dim,
+    np.float64_t *height,
+) noexcept nogil:
+    """Squared distance from p to boundary facet f.
+
+    Also sets ``height``, p's signed distance from the facet's plane along its
+    outward normal.
+    """
+    cdef:
+        int a
+        np.float64_t ab[3]
+        np.float64_t ac[3]
+        np.float64_t ap[3]
+        np.float64_t q[3]
+        np.float64_t n[3]
+        np.float64_t d1, d2, d3, d4, d5, d6, va, vb, vc, v, w, denom, nn, dist2
+    for a in range(dim):
+        ab[a] = facets[f, 1, a] - facets[f, 0, a]
+        ap[a] = p[a] - facets[f, 0, a]
+    if dim == 2:
+        d1 = ab[0] * ap[0] + ab[1] * ap[1]
+        nn = ab[0] * ab[0] + ab[1] * ab[1]
+        v = d1 / nn
+        if v < 0.0:
+            v = 0.0
+        elif v > 1.0:
+            v = 1.0
+        q[0] = ap[0] - v * ab[0]
+        q[1] = ap[1] - v * ab[1]
+        # outward normal (ab_y, -ab_x)
+        height[0] = (ap[0] * ab[1] - ap[1] * ab[0]) / sqrt(nn)
+        return q[0] * q[0] + q[1] * q[1]
+
+    for a in range(3):
+        ac[a] = facets[f, 2, a] - facets[f, 0, a]
+    n[0] = ab[1] * ac[2] - ab[2] * ac[1]
+    n[1] = ab[2] * ac[0] - ab[0] * ac[2]
+    n[2] = ab[0] * ac[1] - ab[1] * ac[0]
+    nn = sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2])
+    height[0] = (ap[0] * n[0] + ap[1] * n[1] + ap[2] * n[2]) / nn
+
+    # Closest point on a triangle (Ericson, Real-Time Collision Detection,
+    # section 5.1.5), found from its barycentric coordinates v and w.
+    d1 = ab[0] * ap[0] + ab[1] * ap[1] + ab[2] * ap[2]
+    d2 = ac[0] * ap[0] + ac[1] * ap[1] + ac[2] * ap[2]
+    # bp = ap - ab, cp = ap - ac
+    d3 = d1 - (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2])
+    d4 = d2 - (ac[0] * ab[0] + ac[1] * ab[1] + ac[2] * ab[2])
+    d5 = d1 - (ab[0] * ac[0] + ab[1] * ac[1] + ab[2] * ac[2])
+    d6 = d2 - (ac[0] * ac[0] + ac[1] * ac[1] + ac[2] * ac[2])
+    vc = d1 * d4 - d3 * d2
+    vb = d5 * d2 - d1 * d6
+    va = d3 * d6 - d5 * d4
+    if d1 <= 0.0 and d2 <= 0.0:
+        v = 0.0
+        w = 0.0
+    elif d3 >= 0.0 and d4 <= d3:
+        v = 1.0
+        w = 0.0
+    elif vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        v = d1 / (d1 - d3)
+        w = 0.0
+    elif d6 >= 0.0 and d5 <= d6:
+        v = 0.0
+        w = 1.0
+    elif vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        v = 0.0
+        w = d2 / (d2 - d6)
+    elif va <= 0.0 and d4 - d3 >= 0.0 and d5 - d6 >= 0.0:
+        w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        v = 1.0 - w
+    else:
+        denom = 1.0 / (va + vb + vc)
+        v = vb * denom
+        w = vc * denom
+    dist2 = 0.0
+    for a in range(3):
+        q[a] = ap[a] - v * ab[a] - w * ac[a]
+        dist2 = dist2 + q[a] * q[a]
+    return dist2
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef inline void _nearest_in_cell(
+    np.float64_t *p,
+    Py_ssize_t cell,
+    np.float64_t[:, :, :] facets,
+    np.int64_t[:] grid_ptr,
+    np.int64_t[:] grid_facets,
+    int dim,
+    np.int64_t *best,
+    np.float64_t *best_d2,
+    np.float64_t *best_height,
+) noexcept nogil:
+    """Update the nearest facet so far with the facets in one grid cell."""
+    cdef:
+        Py_ssize_t j, f
+        np.float64_t d2, height, tie
+    for j in range(grid_ptr[cell], grid_ptr[cell + 1]):
+        f = grid_facets[j]
+        d2 = _facet_distance2(p, facets, f, dim, &height)
+        tie = 1E-12 * best_d2[0]
+        # Several facets are equally near a point closest to an edge or node
+        # they share; take the one the point is most directly in front of.
+        if d2 < best_d2[0] - tie or (
+            d2 <= best_d2[0] + tie and height > best_height[0]
+        ):
+            best[0] = f
+            best_d2[0] = d2
+            best_height[0] = height
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef np.int64_t _nearest_facet(
     np.float64_t[:, :] locs,
     Py_ssize_t i,
-    np.float64_t[:] origin,
     np.float64_t[:, :, :] facets,
-    np.float64_t tol,
+    np.float64_t[:] grid_origin,
+    np.float64_t grid_h,
+    np.int64_t[:] grid_shape,
+    np.int64_t[:] grid_ptr,
+    np.int64_t[:] grid_facets,
 ) noexcept nogil:
-    """The last boundary facet through which the segment from ``origin`` to
-    point i leaves the mesh, or -1 if it does not leave it.
+    """The boundary facet nearest to point i.
 
-    Tests every facet, so only for the rare point whose walk gave up. Going
-    backwards from the point, it is the first facet the segment enters through.
+    Searches the grid cells in rings (cubic shells) around the cell nearest to
+    the point, until the next ring can't hold anything nearer. Every facet is
+    listed in each cell its bounding box overlaps, so after the ring at
+    distance r (in cells) every facet within ``r * grid_h`` of the point has
+    been seen. For a point outside the grid that holds for its projection onto
+    the grid, which is no farther than the point from anything in the grid.
     """
     cdef:
         int a, dim = locs.shape[1]
-        Py_ssize_t f
+        np.int64_t r, r_max = 0, i0, i1, i2, n0, n1, n2
+        np.int64_t c0[3]
+        np.int64_t lo[3]
+        np.int64_t hi[3]
         np.int64_t best = -1
-        np.float64_t o[3]
-        np.float64_t d[3]
-        np.float64_t best_t = 2.0, t
+        bint on0, on1
+        np.float64_t p[3]
+        np.float64_t x, best_d2 = INFINITY, best_height = -INFINITY
     for a in range(dim):
-        o[a] = locs[i, a]
-        d[a] = origin[a] - locs[i, a]
-    for f in range(facets.shape[0]):
-        if _enters(o, d, facets, f, dim, tol, &t) and t < best_t:
-            best_t = t
-            best = f
+        p[a] = locs[i, a]
+        x = floor((p[a] - grid_origin[a]) / grid_h)
+        if x < 0.0:
+            x = 0.0
+        if x > grid_shape[a] - 1:
+            x = grid_shape[a] - 1
+        c0[a] = <np.int64_t>x
+        r_max = max(r_max, grid_shape[a])
+    n0 = grid_shape[0]
+    n1 = grid_shape[1]
+    n2 = grid_shape[2] if dim == 3 else 1
+
+    for r in range(r_max + 1):
+        for a in range(dim):
+            lo[a] = c0[a] - r
+            hi[a] = c0[a] + r
+        # Visit only the cells on the shell of the box of cells within r.
+        for i0 in range(max(lo[0], 0), min(hi[0], n0 - 1) + 1):
+            on0 = i0 == lo[0] or i0 == hi[0]
+            if dim == 2:
+                if on0:
+                    for i1 in range(max(lo[1], 0), min(hi[1], n1 - 1) + 1):
+                        _nearest_in_cell(
+                            p, i0 * n1 + i1, facets, grid_ptr, grid_facets, dim,
+                            &best, &best_d2, &best_height
+                        )
+                else:
+                    if lo[1] >= 0:
+                        _nearest_in_cell(
+                            p, i0 * n1 + lo[1], facets, grid_ptr, grid_facets, dim,
+                            &best, &best_d2, &best_height
+                        )
+                    if hi[1] < n1:
+                        _nearest_in_cell(
+                            p, i0 * n1 + hi[1], facets, grid_ptr, grid_facets, dim,
+                            &best, &best_d2, &best_height
+                        )
+                continue
+            for i1 in range(max(lo[1], 0), min(hi[1], n1 - 1) + 1):
+                on1 = i1 == lo[1] or i1 == hi[1]
+                if on0 or on1:
+                    for i2 in range(max(lo[2], 0), min(hi[2], n2 - 1) + 1):
+                        _nearest_in_cell(
+                            p, (i0 * n1 + i1) * n2 + i2, facets, grid_ptr,
+                            grid_facets, dim, &best, &best_d2, &best_height
+                        )
+                else:
+                    if lo[2] >= 0:
+                        _nearest_in_cell(
+                            p, (i0 * n1 + i1) * n2 + lo[2], facets, grid_ptr,
+                            grid_facets, dim, &best, &best_d2, &best_height
+                        )
+                    if hi[2] < n2:
+                        _nearest_in_cell(
+                            p, (i0 * n1 + i1) * n2 + hi[2], facets, grid_ptr,
+                            grid_facets, dim, &best, &best_d2, &best_height
+                        )
+        if best != -1 and best_d2 <= (r * grid_h) * (r * grid_h):
+            break
     return best
 
 
@@ -610,6 +762,7 @@ def _directed_search(
     np.int64_t[:] grid_shape,
     np.int64_t[:] grid_ptr,
     np.int64_t[:] grid_facets,
+    bint nearest_outside,
     np.float64_t eps=1E-15,
 ):
     """Locate points by walking from simplex to simplex.
@@ -631,18 +784,18 @@ def _directed_search(
     falls back to testing every simplex. Either way, the next point's walk
     starts from the simplex actually found.
 
-    A point outside the mesh is given the boundary simplex its walk stopped
-    in. If its walk gave up instead, it is given the simplex behind the last
-    boundary facet the segment from the center of the simplex the walk gave up
-    in to the point leaves the mesh through.
+    With ``nearest_outside``, a point outside the mesh is given the simplex
+    behind the boundary facet nearest to it (see ``_nearest_facet``), so it
+    doesn't depend on where its walk started. Otherwise it keeps the simplex
+    its walk ended in.
 
     Returns
     -------
     status : (n_locs) numpy.ndarray of int
         The simplex containing each point, or -1 if it is outside the mesh.
     last : (n_locs) numpy.ndarray of int
-        The simplex containing each point, or for points outside the mesh a
-        boundary simplex near it.
+        The simplex containing each point, or for points outside the mesh the
+        simplex given to it (see ``nearest_outside``).
     barys : (n_locs, dim + 1) numpy.ndarray of float
         Each point's barycentric coordinates in ``last``.
     n_jumps : int
@@ -715,15 +868,14 @@ def _directed_search(
                     i_simp = state
                     for a in range(dim + 1):
                         barys[a] = found_barys[a]
-                else:
-                    # The walk gave up somewhere inside the mesh, so find a
-                    # boundary simplex near the point to extrapolate from.
-                    f = _last_exit_facet(
-                        locs, i, cell_centers[i_simp], facets, 1E-12
-                    )
-                    if f >= 0:
-                        i_simp = facet_cells[f]
-                    _barycentric_all(locs, i, transform, shift, i_simp, barys)
+            if state == -1 and nearest_outside:
+                f = _nearest_facet(
+                    locs, i, facets, grid_origin, grid_h, grid_shape, grid_ptr,
+                    grid_facets
+                )
+                if f >= 0:
+                    i_simp = facet_cells[f]
+                    _barycentric(locs, i, transform, shift, i_simp, eps, barys)
             status[i] = state
             last[i] = i_simp
             for a in range(dim + 1):

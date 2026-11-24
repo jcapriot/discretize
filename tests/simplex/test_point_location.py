@@ -438,3 +438,60 @@ def test_gave_up_outside_points_get_boundary_cell(monkeypatch, convex):
         atol=1e-12,
     )
     assert np.all(np.any((mesh.neighbors[inds] == -1) & (barys < 0), axis=1))
+
+
+def _point_facet_distances(locs, facets):
+    """Distance from each point to each facet (segments in 2D, triangles in
+    3D), as an (n_locs, n_facets) array."""
+    p = locs[:, None, :]
+    a = facets[None, :, 0]
+
+    def to_segment(a, b):
+        ab = b - a
+        t = np.clip(np.sum((p - a) * ab, -1) / np.sum(ab * ab, -1), 0, 1)
+        return np.linalg.norm(p - a - t[..., None] * ab, axis=-1)
+
+    if facets.shape[-1] == 2:
+        return to_segment(a, facets[None, :, 1])
+    b, c = facets[None, :, 1], facets[None, :, 2]
+    d = np.minimum(np.minimum(to_segment(a, b), to_segment(b, c)), to_segment(c, a))
+    # or the distance to the plane, if the point projects inside the triangle
+    n = np.cross(b - a, c - a)
+    n = n / np.linalg.norm(n, axis=-1, keepdims=True)
+    h = np.sum((p - a) * n, -1)
+    q = p - h[..., None] * n
+    inside = np.ones(d.shape, dtype=bool)
+    for u, v in [(a, b), (b, c), (c, a)]:
+        inside &= np.sum(np.cross(v - u, q - u) * n, -1) >= 0
+    return np.where(inside, np.abs(h), d)
+
+
+@pytest.mark.parametrize("dim", [2, 3])
+def test_outside_points_get_nearest_boundary_cell(dim):
+    # The U shaped mesh, where a walk can stop on a wall across the slot from
+    # the point.
+    nodes, simplices = example_simplex_mesh((12,) * dim)
+    c = nodes[simplices].mean(axis=1)
+    slot = (c[:, 0] > 0.3) & (c[:, 0] < 0.7) & (c[:, 1] > 0.3)
+    mesh = _remove_cells(nodes, simplices, slot)
+    rng = np.random.default_rng(13)
+    locs = rng.uniform(-0.4, 1.4, (3000, dim))
+    facets = mesh.nodes[mesh._boundary_facets_nodes]
+    d = _point_facet_distances(locs, facets)
+
+    for spatial_sort in (True, False):
+        inds, barys, outside = mesh._locate(locs, spatial_sort=spatial_sort)
+        npt.assert_equal(outside, ~_contains(mesh, locs))
+        # The assigned cell has a boundary face as near as the nearest one.
+        own = mesh._boundary_facet_cells[None, :] == inds[:, None]
+        d_own = np.where(own, d, np.inf).min(axis=1)
+        npt.assert_allclose(d_own[outside], d.min(axis=1)[outside], rtol=1e-10)
+        npt.assert_allclose(
+            np.einsum("ni,nij->nj", barys, mesh.nodes[mesh.simplices[inds]]),
+            locs,
+            atol=1e-12,
+        )
+        if spatial_sort:
+            first = inds
+    # so the cell doesn't depend on the order of the points
+    npt.assert_equal(inds, first)

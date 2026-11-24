@@ -985,7 +985,7 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
             self._boundary_facets = (facets, cells.astype(np.int64))
         return self._boundary_facets
 
-    def _locate(self, locs, spatial_sort=True):
+    def _locate(self, locs, spatial_sort=True, nearest_outside=True):
         """Find the simplex containing each point.
 
         Parameters
@@ -996,13 +996,17 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
             Walk the points in Morton (Z-order) curve order, so each walk starts
             near its point. If False, walk them in the given order, which is
             as good for points that are already ordered, e.g. along lines.
+        nearest_outside : bool, optional
+            Give points outside the mesh the cell behind the boundary face
+            nearest to them. If False, they get whichever boundary cell their
+            walk ended in (for when that cell won't be used).
 
         Returns
         -------
         inds : (n) numpy.ndarray of int
-            The simplex containing each point. For points outside the mesh, a
-            nearby simplex on the boundary, and -1 for points with non-finite
-            coordinates.
+            The simplex containing each point. For points outside the mesh,
+            the simplex behind the nearest boundary face, and -1 for points
+            with non-finite coordinates.
         barys : (n, dim + 1) numpy.ndarray of float
             Each point's barycentric coordinates in ``inds`` (zero for points
             with non-finite coordinates).
@@ -1049,9 +1053,11 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
         facet_cells = self._boundary_facet_cells
         if verify:
             hull_equations = self._boundary_hull_equations
-            grid = self._boundary_facet_grid
         else:
             hull_equations = np.empty((0, self.dim + 1))
+        if verify or nearest_outside:
+            grid = self._boundary_facet_grid
+        else:
             grid = (
                 np.zeros(self.dim),
                 1.0,
@@ -1078,6 +1084,7 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
             upper,
             hull_equations,
             *grid,
+            nearest_outside,
         )
         inds[order] = last
         out_barys[order] = barys
@@ -1102,8 +1109,8 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
         -------
         (n) numpy.ndarray of int
             Index of the cell containing each point. For points outside the
-            mesh, the index of a nearby cell on its boundary, and -1 for points
-            with non-finite coordinates.
+            mesh, the index of the cell behind the boundary face nearest to
+            it, and -1 for points with non-finite coordinates.
         """
         return self._locate(locs, spatial_sort=spatial_sort)[0]
 
@@ -1140,7 +1147,7 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
             - 'CC', 'cell_centers'      -> scalar field defined on cell centers
         zeros_outside : bool, optional
             If *False*, values at locations outside the mesh are extrapolated
-            from a nearby cell on its boundary. If *True*, values at locations
+            from the cell behind the boundary face nearest to them. If *True*, values at locations
             outside the mesh will be zero. Values at locations with non-finite
             coordinates are always zero.
         spatial_sort : bool, optional
@@ -1161,7 +1168,9 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
         simplex_nodes = self.simplices
         transform, shift = self.transform_and_shift
 
-        inds, barys, outside = self._locate(loc, spatial_sort=spatial_sort)
+        inds, barys, outside = self._locate(
+            loc, spatial_sort=spatial_sort, nearest_outside=not zeros_outside
+        )
         # Points with non-finite coordinates have zero weights and index -1.
         not_found = inds == -1
 
