@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 import discretize
 from discretize.utils import example_simplex_mesh
@@ -494,3 +495,15 @@ def test_zeros_outside():
         outside_point, location_type="nodes", zeros_outside=True
     )
     np.testing.assert_equal(Q2.data, 0)
+
+
+@pytest.mark.parametrize("location_type", ["edges", "faces"])
+def test_2d_z_is_second_axis(location_type):
+    # On a 2D mesh the second axis is often z (e.g. an x-z section), so z
+    # components are the same as y components.
+    nodes, simplices = discretize.utils.example_simplex_mesh((5, 5))
+    mesh = discretize.SimplexMesh(nodes, simplices)
+    locs = np.random.default_rng(0).uniform(0, 1, (20, 2))
+    Py = mesh.get_interpolation_matrix(locs, f"{location_type}_y")
+    Pz = mesh.get_interpolation_matrix(locs, f"{location_type}_z")
+    np.testing.assert_equal(Pz.toarray(), Py.toarray())

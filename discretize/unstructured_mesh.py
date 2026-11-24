@@ -1145,11 +1145,14 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
             - 'Fz', 'faces_z'           -> z-component of field defined on z faces
             - 'N', 'nodes'              -> scalar field defined on nodes
             - 'CC', 'cell_centers'      -> scalar field defined on cell centers
+
+            On a 2D mesh, 'Ez' and 'Fz' interpolate the component along its second
+            axis, the same as 'Ey' and 'Fy'.
         zeros_outside : bool, optional
             If *False*, values at locations outside the mesh are extrapolated
-            from the cell behind the boundary face nearest to them. If *True*, values at locations
-            outside the mesh will be zero. Values at locations with non-finite
-            coordinates are always zero.
+            from the cell behind the boundary face nearest to them. If *True*,
+            values at locations outside the mesh will be zero. Values at
+            locations with non-finite coordinates are always zero.
         spatial_sort : bool, optional
             Locating the points walks from cell to cell, starting each point's
             walk where the previous point's ended. By default the points are
@@ -1211,7 +1214,8 @@ class SimplexMesh(BaseMesh, SimplexMeshIO, InterfaceMixins):
             elif component == "y":
                 i_dir = 1
             else:
-                i_dir = -1
+                # z, which on a 2D mesh is the last (second) axis
+                i_dir = self.dim - 1
             if location_type[:-2] == "edges":
                 # grab the barycentric transforms associated with each simplex:
                 ts = transform[inds, :, i_dir]
